@@ -1,0 +1,2261 @@
+import { isDirectCommand } from "../domain";
+import type {
+  Account,
+  Character,
+  Command,
+  InventoryTab,
+  Item,
+  Section,
+  Selection,
+  State,
+} from "../domain";
+import { HttpClient, ApiError, query, segment, safeNumber } from "./http";
+import { emptyState, type DTO, type Pending } from "./model";
+import { refreshOperation } from "./refresh";
+import { prepareOperation, executeOperation } from "./operations";
+
+export const containers: Record<InventoryTab, string[]> = {
+  bag: [
+    "equipment",
+    "consumables",
+    "materials",
+    "quest-items",
+    "profession",
+    "quickbar",
+  ],
+  equipped: ["equipped"],
+  petbag: ["pet-equipment", "pet-consumables"],
+  warehouse: ["warehouse"],
+  account: ["account-cargo", "shared"],
+  pets: ["pets"],
+  avatars: ["avatars"],
+  emblems: ["materials"],
+};
+const jobNames = [
+  "鬼剑士",
+  "格斗家",
+  "神枪手",
+  "魔法师",
+  "圣职者",
+  "女枪手",
+  "暗夜使者",
+  "男格斗家",
+  "男魔法师",
+  "黑暗武士",
+  "缔造者",
+  "女鬼剑士",
+  "守护者",
+  "魔枪士",
+  "女圣职者",
+];
+export function characterDTO(v: DTO, previous?: Character): Character {
+  return {
+    ...previous,
+    id: String(v.characterId),
+    accountId: v.accountId,
+    name: v.name,
+    job: jobNames[Number(v.job)] || v.job,
+    jobCode: v.job,
+    growType: v.growType,
+    level: v.level,
+    online: previous?.online ?? null,
+    gold: previous?.gold ?? NaN,
+    sp: previous?.sp ?? NaN,
+    tp: previous?.tp ?? NaN,
+  };
+}
+export function accountDTO(v: DTO, previous?: Account): Account {
+  return {
+    ...previous,
+    id: v.accountId,
+    name: v.name,
+    status: v.disabled ? "限制登录" : "正常",
+    points: previous?.points ?? NaN,
+    tokens: previous?.tokens ?? NaN,
+    characterCount: v.characterCount,
+  };
+}
+export function itemDTO(v: DTO, c: Character, tab: InventoryTab): Item {
+  const a = v.attributes || {},
+    rarities = ["普通", "高级", "稀有", "神器", "史诗", "传说"] as const;
+  return {
+    key: `${c.id}/${v.container}/${v.slot}`,
+    characterId: c.id,
+    ...(v.container === "account-cargo" || v.container === "shared"
+      ? { accountId: c.accountId }
+      : {}),
+    tab,
+    slot: v.slot,
+    id: v.itemId,
+    expiration: v.templateExpiration,
+    name: v.name || `物品 ${v.itemId}`,
+    category:
+      v.category ||
+      (/avatar emblem/.test(v.tag || "")
+        ? "徽章"
+        : /avatar/.test(v.tag || "")
+          ? "时装"
+          : v.tag === "weapon"
+            ? "武器"
+            : /^(coat|pants|shoulder|waist|shoes)$/.test(v.tag || "")
+              ? "防具"
+              : /^(ring|amulet|wrist)$/.test(v.tag || "")
+                ? "首饰"
+                : /^(support|magic stone)$/.test(v.tag || "")
+                  ? "辅助装备"
+                  : v.tag === "creature"
+                    ? "宠物"
+                    : /^artifact/.test(v.tag || "")
+                      ? "宠物装备"
+                      : v.kind === "equipment"
+                        ? "装备"
+                        : v.container === "consumables"
+                          ? "消耗品"
+                          : "材料"),
+    rarity: rarities[v.rarity] || "普通",
+    count: safeNumber(v.count),
+    level: v.minimumLevel ?? 0,
+    enhance:
+      /avatar/i.test(v.tag || "") || v.container === "avatars"
+        ? NaN
+        : safeNumber(a.reinforce),
+    amplify:
+      /avatar/i.test(v.tag || "") || v.container === "avatars"
+        ? NaN
+        : safeNumber(a.amplifyType),
+    forge:
+      /avatar/i.test(v.tag || "") || v.container === "avatars"
+        ? NaN
+        : safeNumber(a.forging),
+    bound: v.bound,
+    version: 0,
+    remote: {
+      container: v.container,
+      revision: v.revisionScope === "summary" ? undefined : v.revision,
+      pvf: v.pvfChecksum,
+      attributes: a,
+      known: v.definitionKnown,
+      kind: v.kind,
+      subtype: v.tag,
+      expiresAt: v.expiresAt,
+    },
+  };
+}
+export function merge<T>(old: T[], next: T[], key: (x: T) => string): T[] {
+  const m = new Map(old.map((x) => [key(x), x]));
+  next.forEach((x) => m.set(key(x), x));
+  return [...m.values()];
+}
+
+export class ConsoleAPI {
+  state = emptyState();
+  current = "";
+  sectionId: Section = "query";
+  http: HttpClient;
+  onToast?: (message: string) => void;
+  private epoch = 0;
+  private retries = new Set<() => Promise<void>>();
+  private controllers = new Map<string, AbortController>();
+  private selected: Selection = { accounts: [], characters: [] };
+  private restoredCharacterId = "";
+  private resolvedAccountNames = new Set<string>();
+  private lastBlockedPreview?: { command: Command; selection: Selection };
+  private lastPrepared?: { id: string; command: Command; selection: Selection };
+  constructor(
+    private emit: (s: State) => void,
+    http = new HttpClient(),
+  ) {
+    this.http = http;
+  }
+  get meta() {
+    return this.state.api!;
+  }
+  publish() {
+    this.emit({ ...this.state, api: { ...this.meta } });
+  }
+  patch(v: Partial<State>) {
+    this.state = { ...this.state, ...v };
+    this.publish();
+  }
+  error(e: unknown) {
+    if ((e as Error).name === "AbortError") return;
+    if (e instanceof ApiError && e.status === 401) {
+      this.meta.authenticated = false;
+    }
+    this.meta.error = (e as Error).message;
+    this.meta.errorCode = e instanceof ApiError ? e.code : undefined;
+    this.publish();
+  }
+  navigate(section: Section, force = false) {
+    if (this.sectionId === section && !force) return;
+    this.epoch++;
+    this.sectionId = section;
+    this.http.cancelReads();
+    this.controllers.forEach((c) => c.abort());
+    this.retries.clear();
+    this.meta.reading = 0;
+    this.meta.inventory.loading = false;
+    this.meta.catalogLoading = false;
+    this.meta.error = "";
+    this.meta.errorCode = undefined;
+    this.publish();
+  }
+  cancelScope(scope: string) {
+    this.controllers.get(scope)?.abort();
+  }
+  async retry() {
+    const quotaPending = this.repreviewableDungeonQuotaPending();
+    if (quotaPending) {
+      await this.repreviewDungeonQuotas(quotaPending.id);
+      return;
+    }
+    const jobs = [...this.retries];
+    this.retries.clear();
+    this.meta.error = "";
+    this.http.clearCache();
+    await Promise.all(jobs.map((job) => this.guard(job)));
+  }
+  async guard(f: () => Promise<void>, retry = f) {
+    const epoch = this.epoch;
+    this.meta.reading++;
+    this.publish();
+    try {
+      await f();
+    } catch (e) {
+      if (epoch === this.epoch && (e as Error).name !== "AbortError") {
+        this.retries.add(retry);
+        this.error(e);
+      }
+    } finally {
+      if (epoch === this.epoch) {
+        this.meta.reading = Math.max(0, this.meta.reading - 1);
+        this.publish();
+      }
+    }
+  }
+  private async partial(
+    jobs: (() => Promise<unknown>)[],
+    retry?: () => Promise<unknown>,
+  ) {
+    await Promise.all(
+      jobs.map((job) =>
+        this.guard(
+          async () => {
+            await job();
+          },
+          retry
+            ? async () => {
+                await retry();
+              }
+            : undefined,
+        ),
+      ),
+    );
+  }
+  signal(scope: string) {
+    this.controllers.get(scope)?.abort();
+    const controller = new AbortController();
+    this.controllers.set(scope, controller);
+    return controller.signal;
+  }
+  async boot() {
+    try {
+      const cap = await this.http.capabilities();
+      this.meta.features = {
+        ...cap.features,
+        backgroundMail: !!cap.backgroundMail,
+      backgroundBenefits: !!cap.backgroundBenefits,
+      };
+      this.meta.authenticated = true;
+      this.meta.error = "";
+      this.meta.errorCode = undefined;
+      this.restore();
+      this.publish();
+      if (cap.features["system.settings"]) await this.guard(() => this.systemSettings());
+      if (!this.current && this.restoredCharacterId) {
+        const savedId = this.restoredCharacterId;
+        this.restoredCharacterId = "";
+        try {
+          await this.select(savedId);
+        } catch {
+          this.current = "";
+          this.persistCharacterContext();
+        }
+      }
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        this.meta.authenticated = false;
+        this.publish();
+      } else this.error(e);
+    } finally {
+      this.meta.authReady = true;
+      this.publish();
+    }
+  }
+  async login(key: string, remember = true) {
+    const cap = await this.http.login(key, remember);
+    this.meta.features = {
+      ...cap.features,
+      backgroundMail: !!cap.backgroundMail,
+      backgroundBenefits: !!cap.backgroundBenefits,
+    };
+    this.meta.authenticated = true;
+    this.meta.authReady = true;
+    this.meta.error = "";
+    this.meta.errorCode = undefined;
+    this.restore();
+    this.publish();
+    if (cap.features["system.settings"]) await this.guard(() => this.systemSettings());
+    if (!this.current && this.restoredCharacterId) {
+      const savedId = this.restoredCharacterId;
+      this.restoredCharacterId = "";
+      try {
+        await this.select(savedId);
+      } catch {
+        this.current = "";
+        this.persistCharacterContext();
+      }
+    }
+  }
+  async logout() {
+    await this.http.raw("/api/auth/logout", "POST", {});
+    try {
+      if (typeof sessionStorage !== "undefined") {
+        sessionStorage.removeItem("purplemagic-character-context-v1");
+      }
+    } catch {}
+    this.restoredCharacterId = "";
+    this.resolvedAccountNames.clear();
+    this.lastBlockedPreview = undefined;
+    this.lastPrepared = undefined;
+    this.navigate("query", true);
+    this.http.clearCache();
+    this.state = emptyState();
+    this.meta.authReady = true;
+    this.http.csrf = "";
+    this.current = "";
+    this.publish();
+  }
+  private hasResolvedAccountName(a?: Account) {
+    return !!a && (this.resolvedAccountNames.has(a.id) || a.name !== a.id);
+  }
+  private ingestAccountDTO(v: DTO, previous?: Account): Account {
+    if (v?.accountId && typeof v.name === "string" && v.name !== "") {
+      this.resolvedAccountNames.add(v.accountId);
+    }
+    return accountDTO(v, previous);
+  }
+  private ingestCharacterAccount(v: DTO, previous?: Account): Account | undefined {
+    if (!v?.accountId || typeof v.accountName !== "string" || v.accountName === "") {
+      return undefined;
+    }
+    this.resolvedAccountNames.add(v.accountId);
+    return accountDTO(
+      {
+        accountId: v.accountId,
+        name: v.accountName,
+        disabled:
+          typeof v.accountBanned === "boolean"
+            ? v.accountBanned
+            : previous?.status === "限制登录",
+        characterCount: previous?.characterCount,
+      },
+      previous,
+    );
+  }
+  private persistCharacterContext() {
+    try {
+      if (typeof sessionStorage === "undefined") return;
+      sessionStorage.setItem("purplemagic-character-context-v1", JSON.stringify({
+        currentId: this.current,
+        recent: this.meta.recentCharacters.slice(0, 8),
+      }));
+    } catch {}
+  }
+  recordRecentCharacter(id = this.current) {
+    if (!id) return;
+    const c = this.state.characters.find(x => x.id === id);
+    if (!c) return;
+    const a = this.state.accounts.find(x => x.id === c.accountId);
+    const entry: import("./model").RecentCharacter = {
+      id: c.id,
+      accountId: c.accountId,
+      accountName: this.hasResolvedAccountName(a) ? a!.name : undefined,
+      name: c.name,
+      job: c.job,
+      level: c.level,
+    };
+    this.meta.recentCharacters = [
+      entry,
+      ...this.meta.recentCharacters.filter(r => r.id !== c.id),
+    ].slice(0, 8);
+    this.persistCharacterContext();
+    this.publish();
+  }
+  syncRecentCharacter(id: string, patch: Partial<import("./model").RecentCharacter>) {
+    const idx = this.meta.recentCharacters.findIndex(r => r.id === id);
+    if (idx < 0) return;
+    this.meta.recentCharacters = this.meta.recentCharacters.map((r, i) => i === idx ? { ...r, ...patch } : r);
+    this.persistCharacterContext();
+    this.publish();
+  }
+  restore() {
+    try {
+      const raw = sessionStorage.getItem("purplemagic-operations-v2");
+      if (raw) {
+        const saved = JSON.parse(raw);
+        if (saved.pending?.id && Array.isArray(saved.pending.steps) && !saved.pending.completed) {
+          this.meta.pending = saved.pending;
+        }
+        this.meta.operationHistory = Array.isArray(saved.history)
+          ? saved.history.filter(
+              (p: Pending) => p?.id && Array.isArray(p.steps) && !p.completed && p.id !== this.meta.pending?.id,
+            )
+          : [];
+      } else {
+        const legacy = sessionStorage.getItem("purplemagic-pending-v1");
+        if (legacy) {
+          const p = JSON.parse(legacy);
+          if (p.id && Array.isArray(p.steps) && !p.completed) this.meta.pending = p;
+        }
+      }
+      const ctxRaw = sessionStorage.getItem("purplemagic-character-context-v1");
+      if (ctxRaw) {
+        const ctx = JSON.parse(ctxRaw);
+        if (typeof ctx?.currentId === "string" && ctx.currentId) this.restoredCharacterId = ctx.currentId;
+        if (Array.isArray(ctx?.recent)) {
+          this.meta.recentCharacters = ctx.recent
+            .filter((r: any) => r && typeof r.id === "string" && typeof r.name === "string")
+            .slice(0, 8);
+        }
+      }
+    } catch {}
+    this.publish();
+  }
+  persistPending() {
+    this.meta.operationHistory = this.meta.operationHistory.filter((p) => !p.completed);
+    sessionStorage.setItem(
+      "purplemagic-operations-v2",
+      JSON.stringify({
+        pending: this.meta.pending?.completed ? undefined : this.meta.pending,
+        history: this.meta.operationHistory,
+      }),
+    );
+    sessionStorage.removeItem("purplemagic-pending-v1");
+    this.publish();
+  }
+  operationReceipts() {
+    const p = this.meta.pending;
+    const history = this.meta.operationHistory.filter((item) => !item.completed);
+    return p?.confirmed && !p.completed ? [p, ...history] : history;
+  }
+  canDeleteReceipt(p: Pending) {
+    return !(this.meta.busy && this.meta.pending?.id === p.id);
+  }
+  deleteReceipt(id: string) {
+    const p = this.operationReceipts().find(p => p.id === id);
+    if (!p || !this.canDeleteReceipt(p)) return;
+    if (this.meta.pending?.id === id) this.meta.pending = undefined;
+    this.meta.operationHistory = this.meta.operationHistory.filter(p => p.id !== id);
+    if (p.error && this.meta.error === p.error) this.meta.error = "";
+    this.persistPending();
+  }
+  clearReceipts(failedOnly = false) {
+    const removable = this.operationReceipts().filter(p => this.canDeleteReceipt(p) && (failedOnly ? p.rejected : p.completed || p.rejected));
+    const ids = new Set(removable.map(p => p.id));
+    if (this.meta.pending && ids.has(this.meta.pending.id)) this.meta.pending = undefined;
+    this.meta.operationHistory = this.meta.operationHistory.filter(p => !ids.has(p.id));
+    if (removable.some(p => p.error && p.error === this.meta.error)) this.meta.error = "";
+    this.persistPending();
+  }
+  private archivePending() {
+    const p = this.meta.pending;
+    this.meta.operationHistory = this.meta.operationHistory.filter((old) => !old.completed && old.id !== p?.id);
+    if (p && !p.completed && (p.confirmed || p.steps.some(step => step.done))) {
+      p.hidden = true;
+      this.meta.operationHistory = [p, ...this.meta.operationHistory];
+    }
+    this.meta.pending = undefined;
+  }
+  async directory(
+    mode: "accounts" | "characters",
+    q: string,
+    more = false,
+    accountId = "",
+    online = "all",
+  ) {
+    const signal = this.signal("directory");
+    const old = this.meta.directory;
+    const cursor =
+      more &&
+      old.mode === mode &&
+      old.q === q &&
+      old.accountId === accountId &&
+      (old.online || "all") === online
+        ? old.next
+        : "";
+    this.meta.error = "";
+    this.publish();
+    {
+      const path = accountId
+          ? `/api/v1/accounts/${segment(accountId)}/characters`
+          : query(`/api/v1/${mode}`, {
+              q,
+              limit: 20,
+              cursor,
+              ...(mode === "characters" && online !== "all" ? { online } : {}),
+            });
+      const accept = (r: import("./http").Envelope<DTO[]>) => {
+      let chars: Character[] = [],
+        acc: Account[] = [];
+      if (mode === "characters") {
+        const filteredRows = (r.data || []).filter(
+          (v) =>
+            !accountId ||
+            `${v.name} ${v.characterId}`
+              .toLowerCase()
+              .includes(q.toLowerCase()),
+        );
+        chars = filteredRows.map((v) =>
+          characterDTO(
+            v,
+            this.state.characters.find((c) => c.id === String(v.characterId)),
+          ),
+        );
+        const byAccount = new Map<string, Account>();
+        for (const v of filteredRows) {
+          if (!v?.accountId || byAccount.has(v.accountId)) continue;
+          const fromSummary = this.ingestCharacterAccount(
+            v,
+            this.state.accounts.find((a) => a.id === v.accountId),
+          );
+          if (fromSummary) byAccount.set(v.accountId, fromSummary);
+        }
+        acc = [...new Set(chars.map((c) => c.accountId))].map(
+          (id) =>
+            byAccount.get(id) ||
+            this.state.accounts.find((a) => a.id === id) ||
+            accountDTO({ accountId: id, name: id }),
+        );
+      } else {
+        acc = (r.data || []).map((v) => ({
+          ...this.ingestAccountDTO(v, this.state.accounts.find(a => a.id === v.accountId)),
+          ...(v.currency ? { points: safeNumber(v.currency.balance), rawPoints: v.currency.balance } : {}),
+        }));
+      }
+      if (signal.aborted) return;
+      const keepChars = this.state.characters.filter(
+        (c) =>
+          c.id === this.current ||
+          this.selected.characters.includes(c.id) ||
+          this.selected.accounts.includes(c.accountId) ||
+          (more && old.ids.includes(c.id)),
+      );
+      const allChars = merge(keepChars, chars, (c) => c.id);
+      const keepAcc = this.state.accounts.filter(
+        (a) =>
+          a.id ===
+            this.state.characters.find((c) => c.id === this.current)
+              ?.accountId ||
+          this.selected.accounts.includes(a.id) ||
+          (more && old.accountIds.includes(a.id)) ||
+          allChars.some((c) => c.accountId === a.id),
+      );
+      this.meta.directory = {
+        initialized: true,
+        mode,
+        q,
+        online,
+        accountId,
+        next: r.page?.nextCursor || "",
+        ids: more
+          ? [...new Set([...old.ids, ...chars.map((c) => c.id)])]
+          : chars.map((c) => c.id),
+        accountIds: more
+          ? [...new Set([...old.accountIds, ...acc.map((a) => a.id)])]
+          : acc.map((a) => a.id),
+      };
+      this.patch({
+        characters: allChars,
+        accounts: merge(keepAcc, acc, (a) => a.id),
+      });
+        return { acc, chars };
+      };
+      const cached = this.http.peek<DTO[]>(path);
+      if (cached) accept(cached);
+      else if (!more && (old.mode !== mode || old.q !== q || old.accountId !== accountId || (old.online || "all") !== online)) {
+        this.meta.directory = {mode, q, online, accountId, next:"", ids:[], accountIds:[]};
+        this.publish();
+      }
+      const r = await this.http.get<DTO[]>(path, signal);
+      if (signal.aborted) return;
+      const {acc} = accept(r)!;
+      await this.partial([
+        ...(mode === "characters"
+          ? acc
+              .filter((a) => !this.hasResolvedAccountName(a))
+              .map((a) => async () => {
+                const { data } = await this.http.get(
+                  `/api/v1/accounts/${segment(a.id)}`,
+                  signal,
+                );
+                if (signal.aborted) return;
+                this.patch({
+                  accounts: merge(
+                    this.state.accounts,
+                    [this.ingestAccountDTO(data, a)],
+                    (x) => x.id,
+                  ),
+                });
+              })
+          : []),
+        // Counts come with the directory; only visible wallets need supplements.
+        ...(mode === "accounts" && this.meta.features["currency.read"]
+          ? acc.filter(a => !r.data.some(v => v.accountId === a.id && v.currency)).map((a) => async () => {
+              const { data } = await this.http.get(
+                `/api/v1/accounts/${segment(a.id)}/currency`,
+                signal,
+              );
+              if (signal.aborted) return;
+              this.patch({
+                accounts: this.state.accounts.map((x) =>
+                  x.id === a.id
+                    ? {
+                        ...x,
+                        points: safeNumber(data.balance),
+                        rawPoints: data.balance,
+                      }
+                    : x,
+                ),
+              });
+            })
+          : []),
+        ...(mode === "characters" ? [() => this.presence(signal)] : []),
+      ]);
+    }
+  }
+  async resolveSelection(selection: Selection) {
+    this.selected = selection;
+    let chars = this.state.characters;
+    let accs = this.state.accounts;
+    for (const id of selection.accounts) {
+      const { data } = await this.http.get<DTO[]>(
+        `/api/v1/accounts/${segment(id)}/characters`,
+      );
+      for (const v of data || []) {
+        const fromSummary = this.ingestCharacterAccount(
+          v,
+          accs.find((a) => a.id === v.accountId),
+        );
+        if (fromSummary) accs = merge(accs, [fromSummary], (a) => a.id);
+      }
+      chars = merge(
+        chars,
+        (data || []).map((v) =>
+          characterDTO(
+            v,
+            chars.find((c) => c.id === String(v.characterId)),
+          ),
+        ),
+        (c) => c.id,
+      );
+    }
+    for (const id of selection.characters) {
+      if (!chars.some((c) => c.id === id)) {
+        const { data } = await this.http.get(
+          `/api/v1/characters/${segment(id)}`,
+        );
+        const fromSummary = this.ingestCharacterAccount(
+          data.character,
+          accs.find((a) => a.id === data.character?.accountId),
+        );
+        if (fromSummary) accs = merge(accs, [fromSummary], (a) => a.id);
+        chars.push(characterDTO(data.character));
+      }
+    }
+    if (this.selected === selection)
+      this.patch({
+        characters: merge(this.state.characters, chars, (c) => c.id),
+        accounts: merge(this.state.accounts, accs, (a) => a.id),
+      });
+    return chars.filter(
+      (c) =>
+        selection.accounts.includes(c.accountId) ||
+        selection.characters.includes(c.id),
+    );
+  }
+  async presence(signal?: AbortSignal): Promise<Set<string> | null> {
+    try {
+      const { data } = await this.http.get("/api/v1/presence", signal);
+      const ids = new Set<string>((data.characterIds || []).map(String));
+      this.patch({
+        characters: this.state.characters.map((c) => ({
+          ...c,
+          online: ids.has(c.id),
+        })),
+      });
+      return ids;
+    } catch (e) {
+      if ((e as Error).name === "AbortError") throw e;
+      this.patch({
+        characters: this.state.characters.map((c) => ({ ...c, online: null })),
+      });
+      return null;
+    }
+  }
+  setInventoryTab(tab: InventoryTab) {
+    this.meta.inventory = { ...this.meta.inventory, tab };
+    this.publish();
+  }
+  setGmTab(tab: NonNullable<import("./model").LiveData["gmTab"]>) {
+    if (this.meta.gmTab === tab) return;
+    this.meta.gmTab = tab;
+    this.publish();
+  }
+  setAntiCheatState(patch: DTO) {
+    this.meta.antiCheatState = { ...(this.meta.antiCheatState || {}), ...patch };
+  }
+  async accountCharacters(accountId: string, signal?: AbortSignal): Promise<Character[]> {
+    if (!accountId) return [];
+    const { data } = await this.http.get<DTO[]>(
+      `/api/v1/accounts/${segment(accountId)}/characters`,
+      signal,
+    );
+    let onlineIds: Set<string> | null = null;
+    try {
+      const pres = await this.http.get("/api/v1/presence", signal);
+      onlineIds = new Set(pres.data.characterIds || []);
+    } catch (e) {
+      if ((e as Error).name === "AbortError") throw e;
+    }
+    let accs = this.state.accounts;
+    const chars = (data || []).map((v) => {
+      const fromSummary = this.ingestCharacterAccount(
+        v,
+        accs.find((a) => a.id === v.accountId),
+      );
+      if (fromSummary) accs = merge(accs, [fromSummary], (a) => a.id);
+      const base = characterDTO(
+        v,
+        this.state.characters.find((c) => c.id === String(v.characterId)),
+      );
+      return onlineIds ? { ...base, online: onlineIds.has(base.id) } : base;
+    });
+    if (!signal?.aborted) {
+      this.patch({
+        characters: merge(this.state.characters, chars, (c) => c.id),
+        accounts: merge(this.state.accounts, accs, (a) => a.id),
+      });
+    }
+    return chars;
+  }
+  async quickSearch(q: string, signal?: AbortSignal): Promise<{
+    characters: Character[];
+    accounts: Account[];
+    qqMatches: { qq: string; accountId: string; accountName: string }[];
+    accountRoles: Record<string, Character[]>;
+  }> {
+    const keyword = q.trim();
+    if (!keyword) {
+      return { characters: [], accounts: [], qqMatches: [], accountRoles: {} };
+    }
+    const isNumericQQ = /^\d{5,12}$/.test(keyword) && this.meta.features["qqBinding.read"] !== false;
+    const [charRes, accRes, presRes, qqRes] = await Promise.all([
+      this.http.get<DTO[]>(query("/api/v1/characters", { q: keyword, limit: 12 }), signal),
+      this.http.get<DTO[]>(query("/api/v1/accounts", { q: keyword, limit: 8 }), signal),
+      this.http.get("/api/v1/presence", signal).catch(() => null),
+      isNumericQQ ? this.http.get<DTO>(query("/api/v1/anti-cheat/qq/bindings", { search: keyword, offset: 0 }), signal).catch(() => null) : Promise.resolve(null),
+    ]);
+    if (signal?.aborted) return { characters: [], accounts: [], qqMatches: [], accountRoles: {} };
+    const onlineSet = presRes?.data?.characterIds ? new Set<string>(presRes.data.characterIds) : null;
+    const chars = (charRes.data || []).map((v) => {
+      const c = characterDTO(v, this.state.characters.find((x) => x.id === String(v.characterId)));
+      return onlineSet ? { ...c, online: onlineSet.has(c.id) } : c;
+    });
+    const accMap = new Map<string, Account>();
+    for (const v of accRes.data || []) {
+      const a: Account = {
+        ...this.ingestAccountDTO(v, this.state.accounts.find((x) => x.id === v.accountId)),
+        ...(v.currency ? { points: safeNumber(v.currency.balance), rawPoints: v.currency.balance } : {}),
+      };
+      accMap.set(a.id, a);
+    }
+    const qqMatches: { qq: string; accountId: string; accountName: string }[] = [];
+    for (const row of qqRes?.data?.rows || []) {
+      if (!row?.accountId) continue;
+      qqMatches.push({ qq: String(row.qq || ""), accountId: String(row.accountId), accountName: String(row.account || row.accountId) });
+      if (!accMap.has(row.accountId)) {
+        const existing = this.state.accounts.find((x) => x.id === row.accountId);
+        accMap.set(
+          row.accountId,
+          row.account
+            ? this.ingestAccountDTO({ accountId: row.accountId, name: String(row.account) }, existing)
+            : existing || accountDTO({ accountId: row.accountId, name: row.accountId }),
+        );
+      }
+    }
+    const accounts = [...accMap.values()];
+    const accountRoles: Record<string, Character[]> = {};
+    const expandTargets = accounts
+      .filter((a) => a.characterCount === undefined || a.characterCount > 0)
+      .slice(0, 4);
+    await Promise.all(
+      expandTargets.map(async (a) => {
+        try {
+          const { data } = await this.http.get<DTO[]>(`/api/v1/accounts/${segment(a.id)}/characters`, signal);
+          if (signal?.aborted) return;
+          accountRoles[a.id] = (data || []).map((v) => {
+            const c = characterDTO(v, this.state.characters.find((x) => x.id === String(v.characterId)));
+            return onlineSet ? { ...c, online: onlineSet.has(c.id) } : c;
+          });
+        } catch {}
+      }),
+    );
+    for (const v of charRes.data || []) {
+      if (!v?.accountId || accMap.has(v.accountId)) continue;
+      const fromSummary = this.ingestCharacterAccount(
+        v,
+        this.state.accounts.find((x) => x.id === v.accountId),
+      );
+      if (fromSummary) accMap.set(v.accountId, fromSummary);
+    }
+    const missingAccountIds = [...new Set(chars.map((c) => c.accountId))].filter(
+      (id) => !accMap.has(id) && !this.hasResolvedAccountName(this.state.accounts.find((a) => a.id === id)),
+    ).slice(0, 6);
+    await Promise.all(
+      missingAccountIds.map(async (id) => {
+        try {
+          const { data } = await this.http.get(`/api/v1/accounts/${segment(id)}`, signal);
+          if (signal?.aborted) return;
+          accMap.set(id, this.ingestAccountDTO(data, this.state.accounts.find((x) => x.id === id)));
+        } catch {}
+      }),
+    );
+    if (!signal?.aborted) {
+      const allDiscoveredChars = merge(chars, Object.values(accountRoles).flat(), (c) => c.id);
+      this.patch({
+        characters: merge(this.state.characters, allDiscoveredChars, (c) => c.id),
+        accounts: merge(this.state.accounts, [...accMap.values()], (a) => a.id),
+      });
+    }
+    return { characters: chars, accounts: [...accMap.values()], qqMatches, accountRoles };
+  }
+  async openAccountPanel(accountId: string) {
+    if (!accountId) return;
+    const signal = this.signal("accountPanel");
+    const existing = this.state.accounts.find((a) => a.id === accountId);
+    this.meta.accountPanel = {
+      accountId,
+      loading: true,
+      error: "",
+      account: existing,
+    };
+    this.publish();
+    try {
+      const { data: accData } = await this.http.fresh(`/api/v1/accounts/${segment(accountId)}`, signal);
+      if (signal.aborted || this.meta.accountPanel?.accountId !== accountId) return;
+      let account = this.ingestAccountDTO(accData, existing);
+      let currency: DTO | undefined;
+      let premium: DTO | undefined;
+      let adventureName: DTO | undefined;
+      await Promise.all([
+        (async () => {
+          if (!this.meta.features["currency.read"]) return;
+          const { data } = await this.http.fresh(`/api/v1/accounts/${segment(accountId)}/currency`, signal);
+          if (signal.aborted) return;
+          currency = data;
+          account = { ...account, points: safeNumber(data.balance), rawPoints: data.balance };
+        })(),
+        (async () => {
+          if (!this.meta.features["premium.read"]) return;
+          const { data } = await this.http.fresh(`/api/v1/accounts/${segment(accountId)}/premium`, signal);
+          if (signal.aborted) return;
+          premium = data;
+        })(),
+        (async () => {
+          if (!this.meta.features["adventure.read"]) return;
+          const { data } = await this.http.fresh(`/api/v1/accounts/${segment(accountId)}/adventure-name`, signal);
+          if (signal.aborted) return;
+          adventureName = data;
+          if (data?.name) account = { ...account, adventureName: data.name };
+        })(),
+      ]);
+      if (signal.aborted || this.meta.accountPanel?.accountId !== accountId) return;
+      this.meta.accountPanel = {
+        accountId,
+        loading: false,
+        error: "",
+        account,
+        currency,
+        premium,
+        adventureName,
+      };
+      const curChar = this.state.characters.find((c) => c.id === this.current);
+      if (curChar?.accountId === accountId) {
+        if (currency) this.meta.resources.currency = currency;
+        if (premium) this.meta.resources.premium = premium;
+        if (adventureName) this.meta.resources.adventureName = adventureName;
+      }
+      this.patch({
+        accounts: merge(this.state.accounts, [account], (a) => a.id),
+      });
+    } catch (e) {
+      if ((e as Error).name === "AbortError") return;
+      if (this.meta.accountPanel?.accountId === accountId) {
+        this.meta.accountPanel = {
+          ...this.meta.accountPanel,
+          loading: false,
+          error: (e as Error).message,
+        };
+        this.publish();
+      }
+    }
+  }
+  closeAccountPanel() {
+    this.controllers.get("accountPanel")?.abort();
+    this.meta.accountPanel = undefined;
+    this.publish();
+  }
+  async select(id: string) {
+    this.http.cancelReads();
+    this.controllers.forEach((c) => c.abort());
+    const signal = this.signal("selection");
+    const keptTab = (this.meta.inventory?.tab || "bag") as InventoryTab;
+    this.current = id;
+    this.state.items = [];
+    this.state.mails = [];
+    this.meta.resources = {};
+    this.meta.inventory = { tab: keptTab, next: {}, pvf: "", loading: false };
+    this.meta.quests = [];
+    this.meta.error = "";
+    this.meta.errorCode = undefined;
+    this.publish();
+    const charJob = this.character(id, false);
+    if (signal.aborted) {
+      await charJob;
+      return;
+    }
+    const presJob = this.presence(signal).catch((e) => {
+      if ((e as Error)?.name === "AbortError") return null;
+      throw e;
+    });
+    const [, onlineIds] = await Promise.all([charJob, presJob]);
+    if (!signal.aborted && this.current === id) {
+      if (onlineIds) {
+        const cur = this.state.characters.find((x) => x.id === id);
+        if (cur && cur.online !== onlineIds.has(id)) {
+          this.patch({
+            characters: this.state.characters.map((x) =>
+              x.id === id ? { ...x, online: onlineIds.has(id) } : x,
+            ),
+          });
+        }
+      }
+      this.recordRecentCharacter(id);
+    }
+  }
+  async character(id = this.current, withBalances = true) {
+    if (!id) return;
+    const signal = this.signal("character");
+    const { data } = await this.http.get(
+      `/api/v1/characters/${segment(id)}`,
+      signal,
+    );
+    let c = characterDTO(
+      data.character,
+      this.state.characters.find((x) => x.id === id),
+    );
+    if (data.online !== "unknown")
+      c.online = data.online === true || data.online === "online";
+    const existingAcc = this.state.accounts.find((x) => x.id === c.accountId);
+    const summaryAcc = this.ingestCharacterAccount(data.character, existingAcc);
+    let a =
+      summaryAcc ||
+      existingAcc ||
+      this.ingestAccountDTO(
+        (
+          await this.http.get(
+            `/api/v1/accounts/${segment(c.accountId)}`,
+            signal,
+          )
+        ).data,
+      );
+    if (signal.aborted || id !== this.current) return;
+    this.patch({
+      characters: merge(this.state.characters, [c], (x) => x.id),
+      accounts: merge(this.state.accounts, [a], (x) => x.id),
+    });
+    if (!withBalances) return;
+    const reads: [string, string][] = [
+      ["gold", `characters/${segment(id)}/gold`],
+      ["currency", `accounts/${segment(c.accountId)}/currency`],
+    ];
+    const resources: Record<string, DTO> = {};
+    await this.partial(
+      reads.map(([name, path]) => async () => {
+        if (this.meta.features[name + ".read"]) {
+          const { data } = await this.http.get(`/api/v1/${path}`, signal);
+          if (signal.aborted || id !== this.current) return;
+          resources[name] = data;
+          if (name === "gold") c.gold = safeNumber(data.balance);
+          else
+            a = {
+              ...a,
+              points: safeNumber(data.balance),
+              rawPoints: data.balance,
+            };
+        }
+      }),
+      () => this.character(id),
+    );
+    if (signal.aborted || id !== this.current) return;
+    const latest = this.state.characters.find((x) => x.id === id);
+    c = {
+      ...c,
+      sp: Number.isFinite(latest?.sp) ? latest!.sp : c.sp,
+      tp: Number.isFinite(latest?.tp) ? latest!.tp : c.tp,
+      job:
+        latest && latest.jobCode === c.jobCode && latest.growType === c.growType
+          ? latest.job
+          : c.job,
+    };
+    this.meta.resources = { ...this.meta.resources, ...resources };
+    this.patch({
+      characters: merge(this.state.characters, [c], (x) => x.id),
+      accounts: merge(this.state.accounts, [a], (x) => x.id),
+    });
+  }
+  async enter(section: Section, refresh = false) {
+    this.sectionId = section;
+    this.meta.error = "";
+    this.publish();
+    if (!this.meta.authenticated) return;
+    if (refresh) this.http.clearCache();
+    if (refresh && section === "inventory")
+      await this.inventory(this.meta.inventory.tab as InventoryTab);
+    else if (refresh && section === "mail")
+      await this.partial([() => this.mailbox(), () => this.tasks()]);
+    else if (refresh && section === "quests")
+      await this.quests(this.meta.questFilter.status, this.meta.questFilter.q);
+    else if (refresh && section === "gm") {
+      const tab = this.meta.gmTab || "growth";
+      if (tab === "quotas") await this.dungeonQuotas(true);
+      else if (tab === "currency") await this.balances();
+      else if (tab === "premium") await this.premium();
+      else if (tab === "history") await this.partial([() => this.history(), () => this.tasks()]);
+      else await this.growth();
+    }
+    else if (refresh && section === "benefits") await this.benefits();
+    else if (refresh && section === "activities") await this.activities();
+    else if (refresh && section === "anti-cheat") { this.meta.resources.moderationRefresh = { revision: Number(this.meta.resources.moderationRefresh?.revision || 0) + 1 }; this.publish(); }
+    else if (refresh && section === "query") { this.meta.resources.dashboardRefresh = { revision: Number(this.meta.resources.dashboardRefresh?.revision || 0) + 1 }; this.publish(); }
+    else if (refresh && section === "settings") await this.hub();
+    else if (refresh && section === "system") await this.systemSettings();
+  }
+  async inventory(tab: InventoryTab, more = false) {
+    if (!this.current) return;
+    const id = this.current, c = this.state.characters.find(c => c.id === id);
+    if (!c) return;
+    const signal = this.signal("inventory");
+    const same = this.meta.inventory.tab === tab && this.meta.inventory.owner === id;
+    const previous = more && same ? this.state.items : [];
+    const cursors = more && same ? this.meta.inventory.next : {};
+    this.meta.inventory = { tab, owner: id, next: same ? this.meta.inventory.next : {},
+      pvf: same ? this.meta.inventory.pvf : "", loading: true };
+    if (!same) this.state.items = [];
+    this.publish();
+    const chunks = new Map<string, Item[]>();
+    const next: Record<string, string> = {};
+    let pvf = "";
+    try {
+      if (tab === "bag" && !more && this.meta.features["inventory.batch"]) {
+        await this.partial([async () => {
+          await this.http.observe(
+            query(`/api/v1/characters/${segment(id)}/inventory-batch`, {
+              containers: containers.bag.join(","),
+            }),
+            signal,
+            ({ data }) => {
+              if (signal.aborted || id !== this.current) return;
+              pvf = data.pvfChecksum || "";
+              const byContainer = data.containers || {};
+              const batchItems: Item[] = [];
+              for (const container of containers.bag) {
+                const section = byContainer[container];
+                const rows: DTO[] = section?.items || [];
+                for (const v of rows) {
+                  batchItems.push(
+                    itemDTO({ ...v, container: v.container || container, pvfChecksum: pvf }, c, tab),
+                  );
+                }
+                const cursor = section?.page?.nextCursor || section?.nextCursor || "";
+                if (cursor) next[container] = cursor;
+                else delete next[container];
+              }
+              this.patch({ items: batchItems });
+            },
+          );
+        }], () => this.inventory(tab));
+      } else {
+        await this.partial(containers[tab].map(container => async () => {
+          if (more && !cursors[container]) return;
+          await this.http.observe(query(`/api/v1/characters/${segment(id)}/inventory`, {
+            container, limit: 100, cursor: cursors[container],
+          }), signal, ({data, page}) => {
+            if (signal.aborted || id !== this.current) return;
+            if (pvf && pvf !== data.pvfChecksum) throw new Error("PVF 已更新，请刷新背包");
+            pvf = data.pvfChecksum;
+            const rows = (data.items || []).filter((v: DTO) => tab !== "emblems" || /emblem/i.test(v.tag || "") || v.category === "徽章");
+            chunks.set(container, rows.map((v: DTO) => itemDTO({ ...v, pvfChecksum: pvf }, c, tab)));
+            if (page?.nextCursor) next[container] = page.nextCursor; else delete next[container];
+            // Replace each completed container, including deletions; never mix old pages.
+            const waiting = !more && same ? this.state.items.filter(i => !chunks.has(i.remote?.container || "")) : [];
+            this.patch({ items: merge([...previous, ...waiting], [...chunks.values()].flat(), i => i.key) });
+          });
+        }), () => this.inventory(tab));
+      }
+      if (signal.aborted || id !== this.current) return;
+      this.meta.inventory = { tab, owner: id, next, pvf, loading: false };
+      this.publish();
+    } finally {
+      if (!signal.aborted) { this.meta.inventory.loading = false; this.publish(); }
+    }
+  }
+  async item(key: string) {
+    const i = this.state.items.find((i) => i.key === key);
+    if (!i?.remote) return;
+    const id = this.current;
+    const signal = this.signal("item");
+    const { data } = await this.http.get(
+      `/api/v1/characters/${segment(id)}/inventory/${segment(i.remote.container)}/${i.slot}/options`,
+      signal,
+    );
+    if (
+      signal.aborted ||
+      this.current !== id ||
+      !this.state.items.some((x) => x.key === key)
+    )
+      return;
+    const c = this.state.characters.find((c) => c.id === id)!;
+    const item = itemDTO(data.item, c, i.tab);
+    item.remote!.options = data;
+    const equipment = data.configuration?.equipment;
+    if (equipment) {
+      item.level = equipment.minimumLevel;
+      item.enhance = equipment.currentUpgradeLevel;
+      item.amplify = equipment.currentAmplifyType;
+      item.forge = equipment.currentForgingLevel;
+    }
+    item.remote!.relatedRevision = data.item.relatedRevision;
+    item.version = i.version + 1;
+    this.patch({
+      items: this.state.items.map((x) => (x.key === key ? item : x)),
+    });
+  }
+  async mailbox(more = false) {
+    if (!this.current) return;
+    const id = this.current,
+      signal = this.signal("mailbox");
+    await this.http.observe<DTO[]>(
+      query(`/api/v1/characters/${segment(id)}/mailbox`, {
+        limit: 30,
+        cursor: more ? this.meta.mailNext : undefined,
+      }),
+      signal, ({data, page}) => {
+    if (signal.aborted || id !== this.current) return;
+    this.meta.mailNext = page?.nextCursor || "";
+    this.patch({
+      mails: merge(
+        more ? this.state.mails : [],
+        (data || []).map((v) => ({
+          id: v.mailId,
+          characterId: id,
+          title: v.title,
+          body: this.state.mails.find(m => m.id === v.mailId && m.characterId === id)?.body || "",
+          sender: v.sender,
+          gold: safeNumber(v.gold),
+          items: this.state.mails.find(m => m.id === v.mailId && m.characterId === id)?.items || [],
+          createdAt: v.createdAt,
+          claimed: v.claimed,
+        })),
+        (m) => m.id,
+      ),
+    });
+    });
+  }
+  async mail(id: string) {
+    const c = this.current;
+    const { data } = await this.http.get(
+      `/api/v1/characters/${segment(c)}/mailbox/${segment(id)}`,
+    );
+    if (this.current !== c) return;
+    this.patch({
+      mails: this.state.mails.map((m) =>
+        m.id === id
+          ? {
+              ...m,
+              body: data.body,
+              items: (data.attachments || []).map((a: DTO) => ({
+                id: a.itemId,
+                name: a.name || a.itemId,
+                count: safeNumber(a.count),
+                enhance: 0,
+              })),
+            }
+          : m,
+      ),
+    });
+  }
+  async quests(status = "active", q = "", more = false) {
+    if (!this.current && status !== "catalog") return;
+    if (!more && (this.meta.questFilter.status !== status || (status === "catalog" && this.meta.questFilter.q !== q))) {
+      this.meta.quests = []; this.meta.questNext = ""; this.publish();
+    }
+    this.meta.questFilter = { status, q };
+    const id = this.current,
+      signal = this.signal("quests"),
+      path =
+        status === "catalog"
+          ? "/api/v1/quests"
+          : `/api/v1/characters/${segment(id)}/quests`;
+    await this.http.observe(
+      query(path, {
+        state: status === "catalog" ? undefined : status,
+        q: status === "catalog" ? q : undefined,
+        limit: 100,
+        cursor: more ? this.meta.questNext : undefined,
+      }),
+      signal, ({data, page}) => {
+    if (signal.aborted || id !== this.current) return;
+    const states =
+      more || status === "catalog"
+        ? { ...this.state.questStates[id] }
+        : ({} as Record<string, string>);
+    const rows = (data.quests || []).map((v: DTO) => {
+      if (status !== "catalog") states[v.questId] = v.status || "unstarted";
+      return {
+        id: v.questId,
+        name: v.name || `任务 ${v.questId}`,
+        chapter: v.grade || "其他",
+        kind: v.grade || "任务",
+        level: v.levelMin,
+      };
+    });
+    this.meta.quests = merge(
+      more ? this.meta.quests : [],
+      rows,
+      (q: any) => q.id,
+    );
+    this.meta.questNext = page?.nextCursor || "";
+    this.meta.questPVF = data.pvfChecksum;
+    this.patch({ questStates: { [id]: states } });
+    });
+  }
+  async catalog(q: string, more = false, batchSize = 300) {
+    q = q.trim();
+    if (![300, 500, 1000].includes(batchSize)) throw new Error("查询数量无效");
+    if (more && (this.meta.catalogQuery !== q || !this.meta.catalogNext)) return;
+    const signal = this.signal("catalog");
+    if (!more) {
+      this.meta.catalog = [];
+      this.meta.catalogNext = "";
+      this.meta.catalogTotal = 0;
+    }
+    this.meta.catalogQuery = q;
+    this.meta.catalogLoading = true;
+    this.publish();
+    const c = this.state.characters.find(c => c.id === this.current) || ({ id: "", accountId: "" } as Character);
+    const seenCursors = new Set<string>();
+    try {
+      for (let scanned = 0; scanned < batchSize; scanned += 100) {
+        const cursor = this.meta.catalogNext;
+        if (seenCursors.has(cursor)) throw new Error("物品查询未能继续，请重新搜索");
+        seenCursors.add(cursor);
+        const { data, page } = await this.http.get<DTO>(query("/api/v1/items", {
+          q, limit: 100, cursor: cursor || undefined,
+        }), signal);
+        if (signal.aborted) return;
+        this.meta.catalog = merge(this.meta.catalog, (data.items || [])
+          .filter((v: DTO) => !v.invalid)
+          .map((v: DTO) => itemDTO({ ...v, minimumLevel: v.minLevel, slot: 0,
+            container: "catalog", itemId: v.itemId ?? v.id, count: "1" }, c, "bag")), x => x.id);
+        this.meta.catalogNext = page?.nextCursor || "";
+        this.meta.catalogTotal = data.total ?? this.meta.catalog.length;
+        this.publish();
+        if (!this.meta.catalogNext) break;
+      }
+    } finally {
+      if (this.controllers.get("catalog")?.signal === signal) {
+        this.meta.catalogLoading = false;
+        this.publish();
+      }
+    }
+  }
+  async library(q: string, kind: string, more = false) {
+    const signal = this.signal("library");
+    const previous = this.meta.resources.library;
+    const { data, page } = await this.http.get(
+      query("/api/v1/items", {
+        q,
+        kind,
+        limit: 50,
+        cursor: more ? previous?.next : undefined,
+      }),
+      signal,
+    );
+    if (signal.aborted) return;
+    this.meta.resources.library = {
+      ...data,
+      q,
+      kind,
+      next: page?.nextCursor || "",
+      items: merge(
+        more ? previous?.items || [] : [],
+        data.items || [],
+        (v: DTO) => v.itemId,
+      ),
+    };
+    this.publish();
+  }
+  async libraryItem(id: string) {
+    const signal = this.signal("libraryItem");
+    this.meta.resources.libraryItem = { loading: true, id };
+    this.publish();
+    try {
+      const { data } = await this.http.get(
+        `/api/v1/items/${segment(id)}`,
+        signal,
+      );
+      if (signal.aborted) return;
+      this.meta.resources.libraryItem = { ...data, id };
+    } finally {
+      if (!signal.aborted) {
+        this.meta.resources.libraryItem.loading = false;
+        this.publish();
+      }
+    }
+  }
+  async qqBindingSettings(signal?:AbortSignal) {return (await this.http.get("/api/v1/anti-cheat/qq/settings",signal)).data;}
+  async saveQQBindingSettings(settings:{enabled:boolean;allowBinding:boolean;groups:string[];revision:number}) {return await this.http.post("/api/v1/anti-cheat/qq/settings",settings);}
+  async ipRanges(signal?:AbortSignal) { return (await this.http.get("/api/v1/anti-cheat/ip-ranges",signal)).data; }
+  async previewIPRange(target:string) { return (await this.http.get(query("/api/v1/anti-cheat/ip-ranges/preview",{target}))).data; }
+  async createIPRange(input:{target:string;reason:string;expiresAt:string|null;requestId:string}) { return (await this.http.post("/api/v1/anti-cheat/ip-ranges",input)).data; }
+  async releaseIPRange(id:string) { return (await this.http.post(`/api/v1/anti-cheat/ip-ranges/${encodeURIComponent(id)}/release`,{confirm:true})).data; }
+  async changeQQBinding(change:{accountId:string;qq:string;revision:number;action:"enable"|"disable"|"delete";requestId:string}) { return await this.http.post("/api/v1/anti-cheat/qq/bindings",change); }
+  async qqBindings(search:string,offset:number,signal?:AbortSignal) {return (await this.http.get(query("/api/v1/anti-cheat/qq/bindings",{search,offset}),signal)).data;}
+  async moderation(resource: "account-stats" | "clears" | "accounts" | "bans", params: Record<string,string|number|undefined>, signal?: AbortSignal) {
+    return (await this.http.get(query(`/api/v1/anti-cheat/${resource}`,params),signal)).data;
+  }
+  async banTargets(account:string) {return (await this.http.get<import("../moderation").BanTargets>("/api/v1/anti-cheat/ban-targets/"+encodeURIComponent(account))).data;}
+  async changeBan(change: import("../moderation").BanChange) {
+    return await this.http.post<import("../moderation").Ban>("/api/v1/anti-cheat/bans",change,change.requestId);
+  }
+  async activities() {
+    const signal = this.signal("activities");
+    await this.http.observe("/api/v1/activities", signal, ({data}) => {
+      if (signal.aborted) return;
+      this.meta.resources.activities = data;
+      this.publish();
+    });
+  }
+  async pvfMode(mode?: "disk" | "memory") {
+    const signal = this.signal("pvfMode");
+    const data = mode
+      ? await this.http.post("/api/v1/settings/pvf", { mode })
+      : (await this.http.get("/api/v1/settings/pvf", signal)).data;
+    if (signal.aborted) return;
+    this.meta.resources.pvfMode = data;
+    this.publish();
+  }
+  async systemSettings(enabled?: boolean) {
+    const signal = this.signal("systemSettings");
+    const data = enabled === undefined
+      ? (await this.http.get<{carbonMode:boolean}>("/api/v1/settings/system", signal)).data
+      : await this.http.post<{carbonMode:boolean}>("/api/v1/settings/system", {carbonMode:enabled});
+    if (!signal.aborted) { this.meta.systemSettings = data; this.publish(); }
+  }
+  async premium() {
+    const id = this.current, c = this.state.characters.find(c => c.id === id);
+    if (!c || !this.meta.features["premium.read"]) return;
+    const signal = this.signal("premium");
+    const {data} = await this.http.get(`/api/v1/accounts/${segment(c.accountId)}/premium`, signal);
+    if (signal.aborted || this.current !== id) return;
+    this.meta.resources.premium = data;
+    this.publish();
+  }
+  private applyDungeonQuotasData(id: string, data: DTO) {
+    this.meta.resources.dungeonQuotas = data;
+    const hasOnline = typeof data?.online === "boolean";
+    const hasLevel = typeof data?.characterLevel === "number" && Number.isFinite(data.characterLevel);
+    if (hasOnline || hasLevel) {
+      let updated = false;
+      const nextChars = this.state.characters.map((c) => {
+        if (c.id !== id) return c;
+        const nextOnline = hasOnline ? data.online : c.online;
+        const nextLevel = hasLevel ? data.characterLevel : c.level;
+        if (c.online === nextOnline && c.level === nextLevel) return c;
+        updated = true;
+        return { ...c, online: nextOnline, level: nextLevel };
+      });
+      if (updated) {
+        this.state = { ...this.state, characters: nextChars };
+        if (hasLevel) this.syncRecentCharacter(id, { level: data.characterLevel });
+      }
+    }
+    this.publish();
+  }
+  async dungeonQuotas(fresh = false) {
+    const id = this.current, c = this.state.characters.find(c => c.id === id);
+    if (!c || !this.meta.features["dungeonQuotas.read"]) return;
+    const signal = this.signal("quotas");
+    const path = `/api/v1/characters/${segment(id)}/dungeon-quotas`;
+    if (fresh) {
+      this.http.invalidate([`characters:${id}`, "presence"]);
+      const { data } = await this.http.fresh(path, signal);
+      if (signal.aborted || this.current !== id) return;
+      this.applyDungeonQuotasData(id, data);
+      return;
+    }
+    await this.http.observe(path, signal, ({ data }) => {
+      if (signal.aborted || this.current !== id) return;
+      this.applyDungeonQuotasData(id, data);
+    });
+  }
+  async refreshGmTab(tab: "growth" | "quotas" | "currency" | "premium" | "history") {
+    const id = this.current;
+    if (!id) return;
+    this.meta.error = "";
+    this.retries.clear();
+    if (tab === "quotas") {
+      await this.dungeonQuotas(true);
+      if (this.current === id && typeof this.meta.resources.dungeonQuotas?.online !== "boolean") {
+        await this.presence();
+      }
+      return;
+    }
+    const c = this.state.characters.find(x => x.id === id);
+    this.http.invalidate([
+      `characters:${id}`,
+      ...(c?.accountId ? [`accounts:${c.accountId}`] : []),
+      "presence",
+    ]);
+    if (tab === "growth") {
+      await Promise.all([this.character(id, false), this.presence(), this.growth()]);
+    } else if (tab === "currency") {
+      await Promise.all([this.character(id, false), this.presence(), this.balances()]);
+    } else if (tab === "premium") {
+      await Promise.all([this.character(id, false), this.presence(), this.premium()]);
+    } else {
+      await Promise.all([this.character(id, false), this.presence(), this.history(), this.tasks()]);
+    }
+  }
+  async silentRefreshGmTab(tab: "growth" | "quotas" | "currency" | "premium") {
+    if (!this.meta.authenticated || this.meta.busy || !this.current) return;
+    const id = this.current;
+    const c0 = this.state.characters.find((x) => x.id === id);
+    if (!c0) return;
+    const signal = this.signal("silentGm");
+    try {
+      if (tab === "quotas") {
+        if (!this.meta.features["dungeonQuotas.read"]) return;
+        const { data } = await this.http.fresh(`/api/v1/characters/${segment(id)}/dungeon-quotas`, signal);
+        if (signal.aborted || this.current !== id) return;
+        this.applyDungeonQuotasData(id, data);
+        if (typeof data?.online !== "boolean") {
+          const pres = await this.http.fresh("/api/v1/presence", signal);
+          if (signal.aborted || this.current !== id) return;
+          const ids = new Set<string>((pres.data?.characterIds || []).map(String));
+          this.patch({
+            characters: this.state.characters.map((x) => ({ ...x, online: ids.has(x.id) })),
+          });
+        }
+        return;
+      }
+      if (tab === "growth") {
+        let nextChar = { ...c0 };
+        const [lvlRes, spRes, profRes, advRes, presRes] = await Promise.all([
+          this.meta.features["level.read"]
+            ? this.http.fresh(`/api/v1/characters/${segment(id)}/level`, signal).catch(() => null)
+            : Promise.resolve(null),
+          this.meta.features["skillPoints.read"]
+            ? this.http.fresh(`/api/v1/characters/${segment(id)}/skill-points`, signal).catch(() => null)
+            : Promise.resolve(null),
+          this.meta.features["profession.read"]
+            ? this.http.fresh(`/api/v1/characters/${segment(id)}/profession`, signal).catch(() => null)
+            : Promise.resolve(null),
+          this.meta.features["adventure.read"]
+            ? this.http.fresh(`/api/v1/accounts/${segment(c0.accountId)}/adventure-name`, signal).catch(() => null)
+            : Promise.resolve(null),
+          this.http.fresh("/api/v1/presence", signal).catch(() => null),
+        ]);
+        if (signal.aborted || this.current !== id) return;
+        if (lvlRes?.data) {
+          this.meta.resources.level = lvlRes.data;
+          nextChar.level = lvlRes.data.balance.level;
+        }
+        if (spRes?.data) {
+          this.meta.resources.skillPoints = spRes.data;
+          nextChar.sp = spRes.data.balance.bonusSp;
+          nextChar.tp = spRes.data.balance.bonusTp;
+        }
+        if (profRes?.data) {
+          this.meta.resources.profession = profRes.data;
+          this.meta.jobsRaw = profRes.data.jobs;
+          this.meta.jobs = (profRes.data.jobs || []).flatMap((j: DTO) =>
+            (j.choices || []).map((g: DTO) => ({
+              value: `${j.job}:${g.growType}`,
+              label: g.name || j.name,
+            })),
+          );
+          const choice = this.meta.jobs.find(
+            (j) => j.value === `${profRes.data.balance.job}:${profRes.data.balance.growType}`,
+          );
+          nextChar.job = choice?.label || nextChar.job;
+          nextChar.jobCode = String(profRes.data.balance.job);
+          nextChar.growType = profRes.data.balance.growType;
+        }
+        if (advRes?.data) {
+          this.meta.resources.adventureName = advRes.data;
+        }
+        const onlineIds = presRes?.data?.characterIds
+          ? new Set<string>(presRes.data.characterIds.map(String))
+          : null;
+        this.patch({
+          characters: this.state.characters.map((x) => {
+            if (x.id === id) {
+              return {
+                ...x,
+                level: nextChar.level,
+                sp: nextChar.sp,
+                tp: nextChar.tp,
+                job: nextChar.job,
+                jobCode: nextChar.jobCode,
+                growType: nextChar.growType,
+                online: onlineIds ? onlineIds.has(x.id) : x.online,
+              };
+            }
+            return onlineIds ? { ...x, online: onlineIds.has(x.id) } : x;
+          }),
+        });
+        this.syncRecentCharacter(id, { level: nextChar.level, job: nextChar.job });
+        return;
+      }
+      if (tab === "currency") {
+        const [goldRes, ceraRes] = await Promise.all([
+          this.meta.features["gold.read"]
+            ? this.http.fresh(`/api/v1/characters/${segment(id)}/gold`, signal).catch(() => null)
+            : Promise.resolve(null),
+          this.meta.features["currency.read"]
+            ? this.http.fresh(`/api/v1/accounts/${segment(c0.accountId)}/currency`, signal).catch(() => null)
+            : Promise.resolve(null),
+        ]);
+        if (signal.aborted || this.current !== id) return;
+        if (goldRes?.data) this.meta.resources.gold = goldRes.data;
+        if (ceraRes?.data) this.meta.resources.currency = ceraRes.data;
+        this.patch({
+          ...(goldRes?.data
+            ? {
+                characters: this.state.characters.map((x) =>
+                  x.id === id ? { ...x, gold: safeNumber(goldRes.data.balance) } : x,
+                ),
+              }
+            : {}),
+          ...(ceraRes?.data
+            ? {
+                accounts: this.state.accounts.map((a) =>
+                  a.id === c0.accountId
+                    ? { ...a, points: safeNumber(ceraRes.data.balance), rawPoints: ceraRes.data.balance }
+                    : a,
+                ),
+              }
+            : {}),
+        });
+        return;
+      }
+      if (tab === "premium" && this.meta.features["premium.read"]) {
+        const { data } = await this.http.fresh(`/api/v1/accounts/${segment(c0.accountId)}/premium`, signal);
+        if (signal.aborted || this.current !== id) return;
+        this.meta.resources.premium = data;
+        this.publish();
+      }
+    } catch {
+      // Transient network jitter or abort during background auto-refresh is silently ignored.
+    }
+  }
+  async balances(names = ["gold", "currency"]) {
+    const id = this.current, c = this.state.characters.find(c => c.id === id);
+    if (!c) return;
+    const signal = this.signal("balances");
+    await Promise.all(names.map(async name => {
+      if (!this.meta.features[name + ".read"]) return;
+      const path = name === "gold" ? `characters/${segment(id)}/gold` : `accounts/${segment(c.accountId)}/currency`;
+      const {data} = await this.http.get(`/api/v1/${path}`, signal);
+      if (signal.aborted || this.current !== id) return;
+      this.meta.resources[name] = data;
+      if (name === "gold") this.patch({characters:this.state.characters.map(c => c.id === id ? {...c, gold:safeNumber(data.balance)} : c)});
+      else this.patch({accounts:this.state.accounts.map(a => a.id === c.accountId ? {...a, points:safeNumber(data.balance), rawPoints:data.balance} : a)});
+    }));
+  }
+  async growth(names = ["level", "skillPoints", "profession", "adventure"]) {
+    if (!this.current) return;
+    const id = this.current,
+      signal = this.signal("growth");
+    let c = this.state.characters.find((c) => c.id === id)!;
+    await this.partial(
+      [
+        ["level", "level"],
+        ["skillPoints", "skill-points"],
+        ["profession", "profession"],
+        ["adventure", "adventure-name"],
+      ].filter(([name]) => names.includes(name)).map(([name, path]) => async () => {
+        if (!this.meta.features[name + ".read"]) return;
+        await this.http.observe(
+          name === "adventure" ? `/api/v1/accounts/${segment(c.accountId)}/${path}` : `/api/v1/characters/${segment(id)}/${path}`,
+          signal, ({data}) => {
+        if (signal.aborted || id !== this.current) return;
+        this.meta.resources[name === "adventure" ? "adventureName" : name] = data;
+        if (name === "level") {
+          c = { ...c, level: data.balance.level };
+        }
+        if (name === "skillPoints") {
+          c = { ...c, sp: data.balance.bonusSp, tp: data.balance.bonusTp };
+          this.patch({
+            characters: this.state.characters.map((x) =>
+              x.id === id ? { ...x, sp: c.sp, tp: c.tp } : x,
+            ),
+          });
+        }
+        if (name === "profession") {
+          this.meta.jobsRaw = data.jobs;
+          this.meta.jobs = (data.jobs || []).flatMap((j: DTO) =>
+            (j.choices || []).map((g: DTO) => ({
+              value: `${j.job}:${g.growType}`,
+              label: g.name || j.name,
+            })),
+          );
+          const choice = this.meta.jobs.find(
+            (j) => j.value === `${data.balance.job}:${data.balance.growType}`,
+          );
+          c = {
+            ...c,
+            job: choice?.label || c.job,
+            jobCode: String(data.balance.job),
+            growType: data.balance.growType,
+          };
+        }
+        this.publish();
+        });
+      }),
+      () => this.growth(names),
+    );
+    if (!signal.aborted && id === this.current) {
+      this.patch({
+        characters: this.state.characters.map((x) =>
+          x.id === id
+            ? {
+                ...x,
+                level: c.level,
+                sp: c.sp,
+                tp: c.tp,
+                job: c.job,
+                jobCode: c.jobCode,
+                growType: c.growType,
+              }
+            : x,
+        ),
+      });
+      this.syncRecentCharacter(id, { level: c.level, job: c.job });
+    }
+  }
+  async benefits(more = false) {
+    const signal = this.signal("benefits");
+    if (!this.meta.features["benefits.write"]) return;
+    const { data, page } = await this.http.get<DTO[]>(
+      query("/api/v1/benefits", {
+        limit: 30,
+        cursor: more ? this.meta.benefitNext : undefined,
+      }),
+      signal,
+    );
+    if (signal.aborted) return;
+    this.meta.benefitNext = page?.nextCursor || "";
+    this.patch({
+      benefits: merge(
+        more ? this.state.benefits : [],
+        (data || []).map((v) => ({
+          id: v.id,
+          name: v.reward.title,
+          gold: v.reward.gold,
+          cera: v.reward.cera,
+          grantScope: v.scope,
+          enabled: v.enabled,
+          scope: v.autoNewCharacters
+            ? ("future" as const)
+            : ("existing" as const),
+          recipients: [],
+          revision: v.revision,
+          scopeLabel: v.scope === "account" ? "每账号一次" : "每角色一次",
+          rewardSummary: [
+            v.reward.cera
+              ? `点券 ${Number(v.reward.cera).toLocaleString()}`
+              : "",
+            v.reward.gold
+              ? `金币 ${Number(v.reward.gold).toLocaleString()}`
+              : "",
+            ...(v.reward.attachments || []).map(
+              (a: DTO) => `${v.itemName || a.name || a.itemId} × ${a.count}`,
+            ),
+          ]
+            .filter(Boolean)
+            .join("；"),
+        })),
+        (b) => b.id,
+      ),
+    });
+  }
+
+  async tasks(more = false) {
+    const signal = this.signal("tasks");
+    if (!this.meta.features["tasks.read"]) return;
+    const { data, page } = await this.http.get<DTO[]>(
+      query("/api/v1/tasks", {
+        limit: 30,
+        cursor: more ? this.meta.taskNext : undefined,
+      }),
+      signal,
+    );
+    if (signal.aborted) return;
+    this.meta.taskNext = page?.nextCursor || "";
+    this.meta.resources.tasks = {
+      rows: merge(
+        more ? this.meta.resources.tasks?.rows || [] : [],
+        data || [],
+        (v: DTO) => v.id,
+      ),
+    };
+    this.patch({
+      receipts: merge(
+        more
+          ? this.state.receipts
+          : this.state.receipts.filter((r) => r.kind !== "mail"),
+        (data || []).map((v) => ({
+          id: v.id,
+          kind: "mail",
+          target: `${v.total} 个角色`,
+          summary: `${v.reward.title} · 已发 ${v.sent} / ${v.total}${v.failed ? ` · 失败 ${v.failed}` : ""} · ${v.state === "preview" ? "待确认" : v.state === "completed" ? "已完成" : v.state === "failed" ? "待重试" : "处理中"}`,
+          at: v.createdAt,
+          details: v,
+        })),
+        (r) => r.id,
+      ),
+    });
+  }
+  async history(more = false) {
+    const id = this.current,
+      c = this.state.characters.find((c) => c.id === id);
+    if (!c) return;
+    const signal = this.signal("history");
+    const base = `/api/v1/characters/${segment(id)}`;
+    const account = `/api/v1/accounts/${segment(c.accountId)}`;
+    const routes = [
+      ["inventory.write", `${base}/inventory-operations`, "物品"],
+      ["inventory.write", `${account}/inventory-operations`, "账号物品"],
+      ["gold.write", `${base}/gold-operations`, "金币"],
+      ["currency.write", `${account}/currency-adjustments`, "点券"],
+      ["level.write", `${base}/level-operations`, "等级"],
+      ["characters.rename", `${base}/rename-operations`, "角色改名"],
+      ["adventure.read", `${account}/adventure-rename-operations`, "冒险团改名"],
+      ["profession.write", `${base}/profession-operations`, "职业"],
+      ["skillPoints.write", `${base}/skill-point-operations`, "SP / TP"],
+      ["dungeonQuotas.write", `${base}/dungeon-quota-operations`, "副本额度"],
+      ["quests.write", `${base}/quest-operations`, "任务"],
+      ["mailbox.write", `${base}/mailbox-operations`, "邮箱"],
+    ];
+    const cursors: Record<string, string> = {};
+    const rows: State["receipts"] = [];
+    await this.partial(
+      routes.map(([feature, path, label]) => async () => {
+        if (
+          !this.meta.features[feature] ||
+          (more && !this.meta.historyNext[path])
+        )
+          return;
+        const { data, page } = await this.http.get<DTO[]>(
+          query(path, {
+            limit: 20,
+            cursor: more ? this.meta.historyNext[path] : undefined,
+          }),
+          signal,
+        );
+        if (page?.nextCursor) cursors[path] = page.nextCursor;
+        for (const v of data || [])
+          rows.push({
+            id: `${label}:${v.requestId}`,
+            kind: v.kind || label,
+            target: label,
+            summary: `${label} · ${v.reason || "管理操作"}${typeof v.before === "string" ? ` · ${v.before} → ${v.after}` : v.quotaName && v.before && v.after ? ` · ${v.quotaName} ${v.before.used}/${v.before.limit} → ${v.after.used}/${v.after.limit}` : ""}`,
+            at: v.createdAt,
+            details: v,
+          });
+      }),
+      () => this.history(),
+    );
+    if (signal.aborted || this.current !== id) return;
+    this.meta.historyNext = cursors;
+    this.patch({
+      receipts: merge(
+        more
+          ? this.state.receipts
+          : this.state.receipts.filter((r) => r.kind === "mail"),
+        rows,
+        (r) => r.id,
+      ).sort((a, b) => b.at.localeCompare(a.at)),
+    });
+  }
+  async hub() {
+    try {
+      const data = await this.http.raw<DTO>(
+        "/api/v1/hub/state",
+        "GET",
+        undefined,
+        undefined,
+        this.signal("hub"),
+      );
+      this.meta.hub = data;
+      this.meta.hubError = "";
+      const sources = data.sources || [];
+      this.patch({
+        sources: {
+          download: sources[0]?.endpoint || "",
+          gameHost: data.published?.profile?.GameHost || "",
+          gamePort: data.published?.profile?.BootstrapPort || 0,
+        },
+      });
+      await this.hubNews(data.newsPage?.offset ?? this.meta.hubNewsOffset ?? 0, this.meta.hubNewsQuery ?? "");
+    } catch (e) {
+      if ((e as Error).name === "AbortError") return;
+      this.meta.hubError = (e as Error).message;
+      if (e instanceof ApiError && e.status === 401) this.meta.hub = undefined;
+      this.publish();
+    }
+  }
+  async hubNews(offset = 0, q = ""): Promise<void> {
+    const hub = this.meta.hub;
+    if (!hub) return;
+    const signal = this.signal("hub-news");
+    let page: DTO;
+    if (hub.newsManager) {
+      page = await this.http.raw<DTO>(`/api/v1/hub/news?${new URLSearchParams({offset:String(offset),limit:"20",q})}`, "GET", undefined, undefined, signal);
+      if (page.rows.length === 0 && offset > 0) return this.hubNews(Math.max(0,offset-20),q);
+    } else {
+      const rows = (hub.published?.news || []).map((n: DTO,i:number)=>({...n,id:String(i)}));
+      page = {rows, total:rows.length, archiveTotal:rows.length, offset:0, next:-1, revision:hub.newsRevision};
+    }
+    signal.throwIfAborted();
+    hub.newsPage = page; hub.newsRevision = page.revision;
+    this.meta.hubNewsOffset = page.offset; this.meta.hubNewsQuery = q;
+    this.patch({news:[
+      ...JSON.parse(sessionStorage.getItem("purplemagic-news-drafts-v1") || "[]"),
+      ...page.rows.map((n:DTO)=>({...n,format:n.format || "text",sourceRevision:page.revision,published:true})),
+    ]});
+  }
+  async prepare(command: Command, selection: Selection, hidden = false) {
+    if (this.meta.busy) return;
+    this.archivePending();
+    this.persistPending();
+    this.meta.busy = true;
+    this.meta.error = "";
+    this.meta.errorCode = undefined;
+    this.lastBlockedPreview = undefined;
+    this.publish();
+    try {
+      const p = await prepareOperation(this, command, selection);
+      if (hidden) p.hidden = true;
+      this.meta.pending = p;
+      this.lastPrepared = { id: p.id, command, selection };
+      this.persistPending();
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "character_online") {
+        this.lastBlockedPreview = { command, selection };
+      }
+      throw e;
+    } finally {
+      this.meta.busy = false;
+      this.publish();
+    }
+  }
+  async resetDungeonQuotaDirect(
+    command: Extract<Command, { kind: "reset-dungeon-quota" }>,
+    selection: Selection,
+  ) {
+    if (this.meta.busy) return;
+    const c = this.state.characters.find((x) => x.id === this.current);
+    if (!c || command.characterId !== c.id) throw new Error("角色已切换，请重新选择");
+    if (!this.meta.features["dungeonQuotas.write"]) throw new Error("当前服务尚未开放副本额度重置");
+    this.meta.busy = true;
+    this.meta.resettingQuotaKey = command.quotaKey;
+    this.meta.error = "";
+    this.meta.errorCode = undefined;
+    this.lastBlockedPreview = undefined;
+    this.publish();
+    const readPath = `/api/v1/characters/${segment(c.id)}/dungeon-quotas`;
+    const opPath = `/api/v1/characters/${segment(c.id)}/dungeon-quota-operations`;
+    const commitOnce = async (data: DTO) => {
+      const entry = (data?.quotas || []).find((q: DTO) => q.key === command.quotaKey);
+      if (!entry) throw new Error("请选择有效的副本额度重置项");
+      if (!entry.canReset || !(entry.used > 0)) {
+        throw new Error("当前副本未消耗次数，无需重置");
+      }
+      const reqKey = crypto.randomUUID();
+      const response = await this.http.raw(
+        opPath,
+        "POST",
+        {
+          accountId: c.accountId,
+          action: "reset",
+          quotaKey: command.quotaKey,
+          revision: data.revision,
+          pvfChecksum: data.pvfChecksum,
+          definitionRevision: data.definitionRevision || "",
+          reason: "PurpleMagic 管理操作",
+          direct: true,
+        },
+        reqKey,
+      );
+      return { entry, done: response.data ?? response };
+    };
+    try {
+      let snapshot = this.meta.resources.dungeonQuotas;
+      if (
+        !snapshot ||
+        snapshot.characterId !== c.id ||
+        !Array.isArray(snapshot.quotas) ||
+        !snapshot.revision ||
+        !snapshot.pvfChecksum ||
+        !snapshot.definitionRevision
+      ) {
+        const { data } = await this.http.fresh(readPath);
+        if (this.current === c.id) this.applyDungeonQuotasData(c.id, data);
+        snapshot = data;
+      }
+      let outcome: { entry: DTO; done: DTO };
+      try {
+        outcome = await commitOnce(snapshot);
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 409 && ["revision_conflict", "pvf_conflict"].includes(e.code)) {
+          const { data: freshData } = await this.http.fresh(readPath);
+          if (this.current === c.id) this.applyDungeonQuotasData(c.id, freshData);
+          const freshEntry = (freshData?.quotas || []).find((q: DTO) => q.key === command.quotaKey);
+          if (!freshEntry || !freshEntry.canReset || !(freshEntry.used > 0)) {
+            throw new Error("角色最新副本额度已刷新，当前副本未消耗次数");
+          }
+          outcome = await commitOnce(freshData);
+        } else {
+          throw e;
+        }
+      }
+      const { entry, done } = outcome;
+      if (this.current === (done.characterId || c.id)) {
+        this.meta.resources.dungeonQuotas = {
+          ...(this.meta.resources.dungeonQuotas?.characterId === c.id ? this.meta.resources.dungeonQuotas : {}),
+          accountId: done.accountId ?? c.accountId,
+          characterId: done.characterId ?? c.id,
+          quotas: done.quotas,
+          pvfChecksum: done.pvfChecksum,
+          definitionRevision: done.definitionRevision,
+          revision: done.revision,
+        };
+      }
+      const limit = done.after?.limit ?? entry.limit;
+      const name = done.quotaName || entry.name;
+      this.onToast?.(`已重置「${name}」已用次数（0/${limit}）`);
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "character_online") {
+        this.lastBlockedPreview = { command, selection };
+      }
+      throw e;
+    } finally {
+      this.meta.busy = false;
+      this.meta.resettingQuotaKey = undefined;
+      this.publish();
+    }
+  }
+  async runDirect(command: Command, selection: Selection) {
+    if (command.kind === "reset-dungeon-quota") {
+      await this.resetDungeonQuotaDirect(command, selection);
+      return;
+    }
+    await this.prepare(command, selection, true);
+    const id = this.meta.pending?.id;
+    if (!id) return;
+    try {
+      await this.confirm(id);
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "character_online") {
+        if (this.meta.pending?.id === id) {
+          this.meta.pending = undefined;
+          this.persistPending();
+        }
+        this.lastBlockedPreview = { command, selection };
+      } else if (this.meta.pending?.id === id && this.meta.pending.hidden && this.meta.pending.rejected) {
+        this.meta.pending = undefined;
+        this.persistPending();
+      }
+      throw e;
+    }
+  }
+  canEnableCarbonAndRetry() {
+    if (this.meta.features["system.settings"] === false || this.meta.systemSettings?.carbonMode) return false;
+    const p = this.meta.pending;
+    if (p && !p.hidden && p.rejected && p.errorCode === "character_online") return true;
+    if (!p && this.meta.error && this.meta.errorCode === "character_online" && this.lastBlockedPreview) return true;
+    return false;
+  }
+  async enableCarbonAndRetry() {
+    if (this.meta.busy) return;
+    await this.systemSettings(true);
+    this.meta.error = "";
+    this.meta.errorCode = undefined;
+    this.retries.clear();
+    const p = this.meta.pending;
+    if (p && p.rejected && p.errorCode === "character_online") {
+      this.onToast?.("已开启在线写入（碳铀模式），正在重新预览");
+      if (this.canRepreviewInventory()) {
+        await this.repreviewInventory(p.id);
+        return;
+      }
+      if (this.canRepreviewDungeonQuotas(p)) {
+        await this.repreviewDungeonQuotas(p.id);
+        return;
+      }
+      if (this.canRepreviewQuests()) {
+        await this.repreviewQuests(p.id);
+        return;
+      }
+      if (this.lastPrepared?.id === p.id) {
+        const { command, selection } = this.lastPrepared;
+        this.deleteReceipt(p.id);
+        await this.prepare(command, selection);
+        return;
+      }
+    }
+    if (this.lastBlockedPreview) {
+      const { command, selection } = this.lastBlockedPreview;
+      this.lastBlockedPreview = undefined;
+      if (isDirectCommand(command, this.state, selection)) {
+        this.onToast?.("已开启在线写入（碳铀模式），正在重试");
+        await this.runDirect(command, selection);
+      } else {
+        this.onToast?.("已开启在线写入（碳铀模式），正在重新预览");
+        await this.prepare(command, selection);
+      }
+    }
+  }
+  cancel() {
+    if (this.meta.busy) throw new Error("操作正在执行，可先收起查看其他页面");
+    this.archivePending();
+    this.persistPending();
+  }
+  dismissPending() {
+    const p = this.meta.pending;
+    if (!p) return;
+    if (p.confirmed && this.meta.busy) {
+      p.hidden = true;
+      this.persistPending();
+    } else if (!this.meta.busy) this.cancel();
+  }
+  openPending(id = this.meta.pending?.id || this.meta.operationHistory[0]?.id) {
+    if (!id) return;
+    if (this.meta.pending?.id !== id) {
+      if (this.meta.busy) return;
+      const p = this.meta.operationHistory.find(old => old.id === id);
+      if (!p) return;
+      this.archivePending();
+      this.meta.operationHistory = this.meta.operationHistory.filter(old => old.id !== id);
+      this.meta.pending = p;
+    }
+    if (!this.meta.pending) return;
+    this.meta.pending.hidden = false;
+    this.persistPending();
+  }
+  canRepreviewQuests() {
+    const p = this.meta.pending;
+    return !!p?.rejected &&
+      ["revision_conflict", "pvf_conflict", "character_online"].includes(p.errorCode || "") &&
+      p.steps.some((s) => !s.done) &&
+      p.steps.every((s) => /\/quest-operations$/.test(s.path));
+  }
+  canRepreviewInventory() {
+    const p = this.meta.pending;
+    return !!p?.rejected && !p.completed && p.steps.length === 1 && !p.steps[0].done &&
+      p.steps[0].path.endsWith("/inventory-operations") &&
+      ["plan_expired", "plan_conflict", "character_online"].includes(p.errorCode || "");
+  }
+  canRepreviewDungeonQuotas(p: Pending | undefined = this.meta.pending) {
+    return !!p?.rejected && !p.completed && p.steps.length === 1 && !p.steps[0].done &&
+      p.steps[0].path.endsWith("/dungeon-quota-operations") &&
+      ["revision_conflict", "pvf_conflict", "plan_conflict", "character_online"].includes(p.errorCode || "");
+  }
+  repreviewableDungeonQuotaPending() {
+    if (this.canRepreviewDungeonQuotas(this.meta.pending)) return this.meta.pending;
+    const latest = this.meta.operationHistory[0];
+    if (!this.meta.pending && this.meta.error && latest?.error === this.meta.error && this.canRepreviewDungeonQuotas(latest)) {
+      return latest;
+    }
+    return undefined;
+  }
+  async repreviewDungeonQuotas(id = this.repreviewableDungeonQuotaPending()?.id) {
+    if (!id || this.meta.busy) return;
+    if (this.meta.pending?.id !== id) {
+      const archived = this.meta.operationHistory.find(old => old.id === id);
+      if (!this.canRepreviewDungeonQuotas(archived)) return;
+      this.openPending(id);
+    }
+    const p = this.meta.pending;
+    if (!p || p.id !== id || !this.canRepreviewDungeonQuotas(p)) return;
+    this.meta.busy = true;
+    this.publish();
+    try {
+      const step = p.steps[0];
+      const readPath = step.path.replace(/\/dungeon-quota-operations$/, "/dungeon-quotas");
+      const { data } = await this.http.fresh(readPath);
+      if (this.current === data.characterId) this.meta.resources.dungeonQuotas = data;
+      const entry = (data?.quotas || []).find((q: DTO) => q.key === step.body.quotaKey);
+      if (!entry || !entry.canReset || !(entry.used > 0)) {
+        throw new Error("角色最新副本额度已刷新，当前副本未消耗次数");
+      }
+      const { planToken: _, ...rest } = step.body;
+      const nextBody = {
+        ...rest,
+        revision: data.revision,
+        pvfChecksum: data.pvfChecksum,
+        definitionRevision: data.definitionRevision || "",
+      };
+      const summary = `重置「${entry.name}」已用次数：${entry.used}/${entry.limit} → 0/${entry.limit}（切换频道或重新选择角色后刷新客户端次数显示）`;
+      const preview = await this.http.post(step.path + "/preview", nextBody);
+      const nextID = crypto.randomUUID();
+      if (p.error && this.meta.error === p.error) this.meta.error = "";
+      this.retries.clear();
+      this.meta.pending = {
+        ...p,
+        id: nextID,
+        createdAt: new Date().toISOString(),
+        summary,
+        steps: [{
+          ...step,
+          id: nextID + "-0",
+          label: summary,
+          body: {
+            ...nextBody,
+            planToken: preview.planToken,
+            definitionRevision: preview.definitionRevision || nextBody.definitionRevision,
+          },
+          result: preview.receipt,
+          attempted: false,
+          refreshed: false,
+        }],
+        confirmed: false,
+        rejected: false,
+        hidden: false,
+        error: undefined,
+        errorCode: undefined,
+      };
+      this.persistPending();
+    } finally {
+      this.meta.busy = false;
+      this.publish();
+    }
+  }
+  async repreviewInventory(id = this.meta.pending?.id) {
+    const p = this.meta.pending;
+    if (!p || p.id !== id || this.meta.busy || !this.canRepreviewInventory()) return;
+    this.meta.busy = true;
+    this.publish();
+    try {
+      const step = p.steps[0];
+      const { planToken: _, ...body } = step.body;
+      // Keep the reviewed item revisions and values. A changed item requires a fresh edit.
+      const preview = await this.http.post(step.path + "/preview", body);
+      const nextID = crypto.randomUUID();
+      if (p.error && this.meta.error === p.error) this.meta.error = "";
+      this.meta.pending = { ...p, id: nextID, createdAt: new Date().toISOString(),
+        steps: [{ ...step, id: nextID + "-0", body: { ...body, planToken: preview.planToken },
+          result: preview.receipt, attempted: false, refreshed: false }],
+        inventoryForceAvailable: preview.forceAvailable === true,
+        confirmed: false, rejected: false, hidden: false, error: undefined, errorCode: undefined };
+      this.persistPending();
+    } finally {
+      this.meta.busy = false;
+      this.publish();
+    }
+  }
+  async repreviewQuests(id = this.meta.pending?.id) {
+    const p = this.meta.pending;
+    if (!p || p.id !== id || this.meta.busy || !this.canRepreviewQuests()) return;
+    this.meta.busy = true;
+    this.publish();
+    try {
+      const steps = [];
+      for (const step of p.steps) {
+        if (step.done) { steps.push(step); continue; }
+        const preview = await this.http.post(step.path + "/preview", step.body);
+        steps.push({ ...step, id: crypto.randomUUID(), result: preview,
+          body: { ...step.body, revision: preview.revision, pvfChecksum: preview.pvfChecksum } });
+      }
+      p.steps = steps;
+      p.confirmed = false;
+      p.rejected = false;
+      p.hidden = false;
+      p.error = p.errorCode = undefined;
+      this.persistPending();
+    } finally {
+      this.meta.busy = false;
+      this.publish();
+    }
+  }
+  async confirm(id = this.meta.pending?.id) {
+    const p = this.meta.pending;
+    if (!p || p.id !== id || p.completed || p.rejected || this.meta.busy) return;
+    this.meta.busy = true;
+    p.confirmed = true;
+    p.error = undefined;
+    p.errorCode = undefined;
+    this.persistPending();
+    try {
+      await executeOperation(this, p);
+      p.completed = true;
+      if (p.draftId) {
+        const drafts = JSON.parse(
+          sessionStorage.getItem("purplemagic-news-drafts-v1") || "[]",
+        );
+        sessionStorage.setItem(
+          "purplemagic-news-drafts-v1",
+          JSON.stringify(drafts.filter((n: DTO) => n.id !== p.draftId)),
+        );
+      }
+      this.persistPending();
+    } catch (e) {
+      p.error = (e as Error).message;
+      p.errorCode = e instanceof ApiError ? e.code : undefined;
+      p.rejected =
+        e instanceof ApiError && [400, 403, 404, 409, 422].includes(e.status);
+      this.persistPending();
+      throw e;
+    } finally {
+      this.meta.busy = false;
+      this.publish();
+    }
+    await refreshOperation(this, p);
+    const isAsyncModalTask =
+      !p.hidden && p.steps.some((s) => s.kind === "task" || s.path.endsWith("/redelivery"));
+    if (p.completed && !p.rejected && !p.error && !this.meta.error && !isAsyncModalTask) {
+      const wasHidden = p.hidden;
+      p.hidden = true;
+      this.persistPending();
+      const label = p.summary || p.title;
+      this.onToast?.(wasHidden ? label : `${p.target ? `${p.target} · ` : ""}${label}`);
+    } else if (p.completed) {
+      this.persistPending();
+    }
+  }
+}

@@ -1,0 +1,21 @@
+name: purplemagic
+description: PurpleMagic Windows player launcher.
+publish_to: none
+version: 1.0.16+1
+environment:
+  sdk: ^3.13.2
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_markdown_plus: ^1.0.12
+  url_launcher: ^6.3.3
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/background.webp
+    - assets/announcement.webp
+    - brand/witch.png

@@ -1,0 +1,117 @@
+package main
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestPlayerProxyBoundary(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Player-IP") != "192.0.2.5" || r.Header.Get("X-Player-Proxy-Key") != "server-secret" {
+			t.Error("spoofed identity")
+		}
+		w.WriteHeader(204)
+	}))
+	defer up.Close()
+	h := handler(config{Upstream: up.URL, ProxySecret: "server-secret", ReleaseDir: t.TempDir()})
+	for _, path := range []string{"/api/game/admin", "/api/player/admin", "/api/v1/dashboard", "/manage/v1/accounts", "/debug/reload", "/launcher/../gateway.json", "/api/patch/file", "/api/account/login?x=1", "/api/diagnostics/context?account=other", "/api/diagnostics/admin"} {
+		r := httptest.NewRequest("POST", path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != 404 {
+			t.Fatalf("exposed %s", path)
+		}
+	}
+	r := httptest.NewRequest("POST", "/api/account/login", strings.NewReader("{}"))
+	r.RemoteAddr = "192.0.2.5:3456"
+	r.Header.Set("X-Player-IP", "forged")
+	r.Header.Set("X-Player-Proxy-Key", "forged")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 204 {
+		t.Fatal(w.Code)
+	}
+	r = httptest.NewRequest("POST", "/api/diagnostics/context", strings.NewReader(`{"read_token":"fixture"}`))
+	r.RemoteAddr = "192.0.2.5:3456"
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 204 {
+		t.Fatal("diagnostic read route not proxied", w.Code)
+	}
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/api/diagnostics/context", nil))
+	if w.Code != 404 {
+		t.Fatal("diagnostic credentials must not use URLs")
+	}
+}
+
+func TestPortableDistributionReadOnlyBoundary(t *testing.T) {
+	dir := t.TempDir()
+	name := "DNF90-Portable-0.2.0.exe"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("MZ portable fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h := handler(config{Upstream: "http://127.0.0.1:1", ReleaseDir: dir})
+	r := httptest.NewRequest("GET", "/launcher/"+name, nil)
+	r.Header.Set("Range", "bytes=0-1")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 206 || w.Body.String() != "MZ" {
+		t.Fatal("portable Range download failed", w.Code)
+	}
+	if got := w.Header().Get("Content-Disposition"); got != `attachment; filename="PurpleMagic.exe"` {
+		t.Fatal("legacy URL must download with PurpleMagic filename", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "PurpleMagic.exe"), []byte("MZ named fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{"GET", "HEAD"} {
+		named := httptest.NewRecorder()
+		h.ServeHTTP(named, httptest.NewRequest(method, "/launcher/PurpleMagic.exe", nil))
+		if named.Code != 200 || named.Header().Get("Cache-Control") != "no-store" || named.Header().Get("Content-Disposition") != `attachment; filename="PurpleMagic.exe"` {
+			t.Fatal("named distribution", method, named.Code)
+		}
+	}
+	for _, path := range []string{"/launcher/" + name + "?download=1", "/launcher/" + name + ".key", "/launcher/DNF90-Portable-../gateway.json", "/launcher/other.exe", "/admin/", "/gm/", "/api/v1/dashboard"} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if w.Code != 404 {
+			t.Fatal("unexpected public file/management route", path, w.Code)
+		}
+	}
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("POST", "/launcher/"+name, strings.NewReader("replace")))
+	if w.Code != 404 {
+		t.Fatal("public distribution allows writes")
+	}
+}
+
+func TestGMHubPrivateRouting(t *testing.T) {
+	stamp := func(code int) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(code) })
+	}
+	h := privateHandler(stamp(201), stamp(202), stamp(203))
+	for path, want := range map[string]int{"/api/internal/hub/state": 203, "/api/v1/hub/state": 203, "/api/v1/accounts": 202, "/admin/api/state": 201} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if w.Code != want {
+			t.Fatal(path, w.Code)
+		}
+	}
+	for _, path := range []string{"/api/internal/hub/state", "/api/v1/hub/state"} {
+		w := httptest.NewRecorder()
+		privateHandler(stamp(201), stamp(202)).ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if w.Code != 404 {
+			t.Fatal("absent hub did not fail closed", path)
+		}
+		w = httptest.NewRecorder()
+		handler(config{Upstream: "http://127.0.0.1:1", ProxySecret: "fixture", ReleaseDir: t.TempDir()}).ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if w.Code != 404 {
+			t.Fatal("public player listener exposed hub", path)
+		}
+	}
+}

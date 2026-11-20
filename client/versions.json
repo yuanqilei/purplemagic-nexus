@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "channel": "stable",
+  "updatedAt": "2026-11-19T21:28:20+08:00",
+  "latest": "1.0.16",
+  "versions": [
+    {
+      "version": "1.0.16",
+      "file": "PurpleMagic-1.0.16.exe",
+      "size": 23832064,
+      "sha256": "42e91426be92d2e9bf615f7a7316bed036af72f4d622358213e696fad69dbdbc",
+      "released": "2026-11-19",
+      "notes": "配套 V216 客户端与 66482976 PVF，重建登录器校验档案",
+      "url": "https://github.com/yuanqilei/xianren/releases/download/1.0.16/PurpleMagic-1.0.16.exe",
+      "distribution": "github-releases"
+    }
+  ]
+}

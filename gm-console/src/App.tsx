@@ -1,0 +1,1050 @@
+import { DelayedSpinner } from "./Loading";
+import { useEffect, useState, useMemo } from "react";
+import {
+  LayoutDashboard,
+  Backpack,
+  Mail,
+  ScrollText,
+  WandSparkles,
+  Gift,
+  CalendarDays,
+  ShieldCheck,
+  Users,
+  Settings2,
+  Megaphone,
+  Sun,
+  Moon,
+  PanelLeft,
+  ChevronRight,
+  CheckCircle2,
+  AlertCircle,
+  RotateCcw,
+  Palette,
+  X,
+  KeyRound,
+  ArrowRightLeft,
+  LoaderCircle,
+  ExternalLink,
+  Zap,
+  Search,
+  ArrowLeft,
+} from "lucide-react";
+import type { Command, Section, Selection } from "./domain";
+import { applyCommand, isDirectCommand, resolveRecipients } from "./domain";
+import { initialState, loadState, persistState } from "./fixtures";
+import {
+  Identity,
+  IconButton,
+  Modal,
+  Field,
+  CheckBox,
+  number,
+  type PageProps,
+} from "./ui";
+import { AccountManagerModal } from "./AccountManagerModal";
+import { Inventory } from "./pages/Inventory";
+import { Dashboard } from "./pages/Dashboard";
+import { Players, PlayerPicker } from "./pages/Players";
+import { MailPage } from "./pages/Mail";
+import { QuestPage } from "./pages/Quests";
+import { GmPage } from "./pages/Gm";
+import { AntiCheatPage } from "./pages/AntiCheat";
+import { ActivitiesPage } from "./pages/Activities";
+import { BenefitsPage } from "./pages/Benefits";
+import { SystemSettings } from "./pages/SystemSettings";
+import { LoginCodes } from "./pages/LoginCodes";
+import { shouldRefreshOnVisibility } from "./api/http";
+import { Settings } from "./pages/Settings";
+import { ConsoleAPI } from "./api/console";
+import { emptyState } from "./api/model";
+import { LiveContext } from "./api/context";
+import { LoginPanel, LiveConfirmation, OperationHistory } from "./api/controls";
+import { Empty } from "./ui";
+const demo =
+  import.meta.env.VITE_CONSOLE_MODE === "demo" ||
+  new URLSearchParams(location.search).get("demo") === "1";
+
+const navigation = [
+  {
+    id: "query",
+    label: "仪表盘",
+    icon: LayoutDashboard,
+    title: "仪表盘",
+    sub: "账号增长、游戏活跃与运营动态。",
+  },
+  {
+    id: "inventory",
+    label: "背包",
+    icon: Backpack,
+    title: "背包与物品",
+    sub: "物品、穿戴与仓库，在一个工作区中管理。",
+  },
+  {
+    id: "mail",
+    label: "邮件",
+    icon: Mail,
+    title: "邮件与发放",
+    sub: "选择收件角色，配置奖励，一次确认完成发放。",
+  },
+  {
+    id: "quests",
+    label: "任务",
+    icon: ScrollText,
+    title: "角色任务",
+    sub: "按章节查看任务进度，完成或重置选中任务。",
+  },
+  {
+    id: "gm",
+    label: "GM",
+    icon: WandSparkles,
+    title: "GM 管理",
+    sub: "角色成长与资产调整。",
+  },
+  { id: "anti-cheat", label: "反作弊", icon: ShieldCheck, title: "反作弊", sub: "查看通关与异常频率，管理账号和 IP 封禁。" },
+  { id: "activities", label: "活动管理", icon: CalendarDays, title: "游戏活动", sub: "管理全服活动开关，查看实际生效状态。" },
+  { id: "benefits", label: "福利规则", icon: Gift, title: "福利规则", sub: "全局奖励自动发放，查看每个账号与角色的发放情况。" },
+  {
+    id: "accounts",
+    label: "账号与角色",
+    icon: Users,
+    title: "账号与角色",
+    sub: "查看账号归属与角色资料，统一选择操作对象。",
+  },
+  {
+    id: "settings",
+    label: "公告与下载源",
+    icon: Megaphone,
+    title: "公告与下载源",
+    sub: "维护公告、更新资源地址与游戏连接。",
+  },
+  { id: "system", label: "系统设置", icon: Settings2, title: "系统设置", sub: "配置 GM 工作台的全局行为。" },
+  { id: "login-codes", label: "注册码", icon: KeyRound, title: "注册码管理", sub: "批量发放注册码并查看绑定状态。" },
+] as const;
+const preferenceKey = "purplemagic-glass-appearance-v1";
+function readPreferences() {
+  try {
+    return {
+      theme: "dark",
+      opacity: 66,
+      blur: 20,
+      background: true,
+      compact: false,
+      ...JSON.parse(localStorage.getItem(preferenceKey) || "{}"),
+    };
+  } catch {
+    return {
+      theme: "dark",
+      opacity: 66,
+      blur: 20,
+      background: true,
+      compact: false,
+    };
+  }
+}
+function readSection(): Section {
+  const hash = location.hash.replace("#", "");
+  const id = hash === "dashboard" ? "query" : hash;
+  return navigation.some((n) => n.id === id) ? (id as Section) : "query";
+}
+
+export function App() {
+  const [state, setState] = useState(() => (demo ? loadState() : emptyState())),
+    [section, setSection] = useState<Section>(readSection),
+    [characterId, setCharacterId] = useState(demo ? "1" : ""),
+    [selection, setSelection] = useState<Selection>({
+      accounts: [],
+      characters: [],
+    }),
+    [preferences, setPreferences] = useState(readPreferences),
+    [appearance, setAppearance] = useState(false),
+    [pickCharacter, setPickCharacter] = useState(false),
+    [manageAccount, setManageAccount] = useState<{ id: string; name?: string } | null>(null),
+    [fromAntiCheat, setFromAntiCheat] = useState(false),
+    [mailComposeTick, setMailComposeTick] = useState(0),
+    [mobileNav, setMobileNav] = useState(false),
+    [reset, setReset] = useState(false);
+  const [tokenPanel, setTokenPanel] = useState(false);
+  const [receiptPanel, setReceiptPanel] = useState(false);
+  const [toast, setToast] = useState<{ text: string; error: boolean } | null>(
+      null,
+    ),
+    [pending, setPending] = useState<{
+      command: Command;
+      requestId: string;
+      summary: string;
+      target: string;
+    } | null>(null);
+  const live = useMemo(() => (demo ? null : new ConsoleAPI(setState)), []);
+  const character = state.characters.find((c) => c.id === characterId) ||
+      (demo ? state.characters[0] : undefined) || {
+        id: "",
+        accountId: "",
+        name: "选择角色",
+        job: "",
+        level: 0,
+        online: null,
+        gold: NaN,
+        sp: NaN,
+        tp: NaN,
+      },
+    nav = navigation.find((n) => n.id === section)!;
+  useEffect(() => {
+    document.title = "PurpleMagic · GM 工作台";
+    const onHash = () => { live?.navigate(readSection()); setSection(readSection()); };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  useEffect(() => {
+    let lastVisibilityRefreshAt = Date.now();
+    const visible = () => {
+      if (!document.hidden && live?.meta.authenticated) {
+        const now = Date.now();
+        if (!shouldRefreshOnVisibility(now, lastVisibilityRefreshAt, live.http.lastReadAt)) {
+          return;
+        }
+        lastVisibilityRefreshAt = now;
+        live.http.invalidate(["players", "directory", "presence"]);
+        void live.guard(async () => {
+          if (live.sectionId === "inventory") await live.inventory(live.meta.inventory.tab as import("./domain").InventoryTab);
+          else if (live.sectionId === "accounts") {
+            const d = live.meta.directory;
+            await live.directory(d.mode, d.q, false, d.accountId || "", d.online);
+          }
+        });
+      }
+    };
+    document.addEventListener("visibilitychange", visible);
+    return () => document.removeEventListener("visibilitychange", visible);
+  }, [live]);
+  useEffect(() => {
+    if (demo) persistState(state);
+  }, [state]);
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.theme = preferences.theme;
+    root.dataset.line = "90";
+    root.dataset.background = preferences.background ? "on" : "off";
+    root.dataset.density = preferences.compact ? "compact" : "normal";
+    root.style.setProperty(
+      "--glass-opacity",
+      String(preferences.opacity / 100),
+    );
+    root.style.setProperty("--blur-glass", `${preferences.blur}px`);
+    localStorage.setItem(preferenceKey, JSON.stringify(preferences));
+  }, [preferences]);
+  useEffect(() => {
+    if (!live) return;
+    live.onToast = (text) => setToast({ text, error: false });
+    return () => {
+      live.onToast = undefined;
+    };
+  }, [live]);
+  useEffect(() => {
+    if (live) void live.boot();
+  }, [live]);
+  useEffect(() => {
+    if (live && live.current !== characterId) {
+      setCharacterId(live.current);
+    }
+  }, [live, state]);
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        if (live && !state.api?.authenticated) return;
+        e.preventDefault();
+        setPickCharacter((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [live, state.api?.authenticated]);
+  useEffect(() => {
+    if (live?.meta.authenticated) void live.guard(() => live.enter(section));
+  }, [live, section, state.api?.authenticated, characterId, character.id]);
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 4500);
+    return () => clearTimeout(timer);
+  }, [toast]);
+  function go(id: Section) {
+    if (section === "anti-cheat" && (id === "inventory" || id === "gm" || id === "accounts")) {
+      setFromAntiCheat(true);
+    } else if (id === "anti-cheat" || (id !== "inventory" && id !== "gm" && id !== "accounts")) {
+      setFromAntiCheat(false);
+    }
+    live?.navigate(id);
+    setSection(id);
+    location.hash = id;
+    setMobileNav(false);
+  }
+  function selectCharacter(id: string) {
+    if (live) live.navigate(live.sectionId, true);
+    if (live)
+      void live.guard(async () => {
+        await live.select(id);
+      });
+    setCharacterId(id);
+    setPickCharacter(false);
+  }
+  function request(command: Command) {
+    if (isDirectCommand(command, state, selection)) {
+      if (live) {
+        void live.guard(() => live.runDirect(command, selection));
+      } else {
+        try {
+          const next = applyCommand(state, command, undefined, crypto.randomUUID());
+          setState(next);
+          setToast({ text: next.receipts[0].summary, error: false });
+        } catch (e) {
+          setToast({ text: (e as Error).message, error: true });
+        }
+      }
+      return;
+    }
+    if (live) {
+      void live.guard(() => live.prepare(command, selection));
+      return;
+    }
+    try {
+      const requestId = crypto.randomUUID(),
+        preview = applyCommand(state, command, undefined, requestId)
+          .receipts[0];
+      setPending({
+        command,
+        requestId,
+        summary: preview.summary,
+        target: preview.target,
+      });
+    } catch (e) {
+      setToast({ text: (e as Error).message, error: true });
+    }
+  }
+  function confirm() {
+    if (!pending) return;
+    try {
+      const next = applyCommand(
+        state,
+        pending.command,
+        undefined,
+        pending.requestId,
+      );
+      setState(next);
+      setToast({ text: next.receipts[0].summary, error: false });
+      setPending(null);
+    } catch (e) {
+      setToast({ text: (e as Error).message, error: true });
+    }
+  }
+  function chooseSelection(value: Selection) {
+    setSelection(value);
+    if (live)
+      void live.guard(async () => {
+        await live.resolveSelection(value);
+      });
+  }
+  const openAccount = (id: string, name?: string) => setManageAccount({ id, name });
+  const props: PageProps = {
+    state,
+    character,
+    selection,
+    setSelection: chooseSelection,
+    selectCharacter,
+    go,
+    request,
+    notify: (text) => setToast({ text, error: false }),
+    openAccount,
+    openCharacterPicker: () => setPickCharacter(true),
+    mailComposeTick,
+  };
+  const batchRecipients = resolveRecipients(state, selection);
+  const hasBatchSelection = selection.accounts.length > 0 || selection.characters.length > 0;
+  const currentRecipients =
+    pending?.command.kind === "mail"
+      ? state.characters.filter(
+          (c) =>
+            pending.command.kind === "mail" &&
+            pending.command.recipients.includes(c.id),
+        )
+      : [];
+  const noIdentity = ["query", "accounts", "settings", "system", "benefits", "activities", "anti-cheat"].includes(section);
+  if (live && !state.api?.authenticated) {
+    return <LiveContext.Provider value={live}>
+      <div className="app-shell auth-shell">
+      <main className="auth-screen">
+        <div className="auth-appearance"><IconButton label={preferences.theme === "dark" ? "切换浅色主题" : "切换深色主题"} onClick={() => setPreferences({ ...preferences, theme: preferences.theme === "dark" ? "light" : "dark" })}>
+          {preferences.theme === "dark" ? <Sun size={19} /> : <Moon size={19} />}
+        </IconButton></div>
+        {state.api?.authReady ? <LoginPanel /> : <div className="auth-restoring" role="status"><LoaderCircle size={23} className="is-spinning" /><span>正在连接工作台</span></div>}
+        {state.api?.error && <p className="auth-service-error inline-error" role="alert">{state.api.error}</p>}
+        <small className="auth-caption">让每一次管理更从容</small>
+      </main>
+      </div>
+    </LiveContext.Provider>;
+  }
+  return (
+    <LiveContext.Provider value={live}>
+      <div className="app-shell">
+        {mobileNav && (
+          <button
+            className="nav-backdrop"
+            aria-label="关闭导航"
+            onClick={() => setMobileNav(false)}
+          />
+        )}
+        <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
+          <a
+            href="#inventory"
+            className="brand"
+            onClick={() => go("inventory")}
+          >
+            <img className="brand-image" src="./brand/witch.png" alt="" width="36" height="36" />
+            <div>
+              <strong>
+                Purple<span>Magic</span>
+              </strong>
+              <small>阿拉德 · GM 工作台</small>
+            </div>
+          </a>
+          <div className="sidebar-label">玩家管理</div>
+          <nav aria-label="主要功能">
+            {navigation.filter((n) => n.id !== "settings" && n.id !== "system").map((n) => (
+              <a
+                href={`#${n.id}`}
+                aria-current={section === n.id ? "page" : undefined}
+                key={n.id}
+                className={section === n.id ? "active" : ""}
+                onClick={() => go(n.id)}
+              >
+                <n.icon size={18} />
+                {n.label}
+                {section === n.id && (
+                  <ChevronRight size={14} className="nav-indicator" />
+                )}
+              </a>
+            ))}
+          </nav>
+          <div className="sidebar-label">系统配置</div>
+          <nav aria-label="系统配置">
+            <a
+              href="#settings"
+              className={section === "settings" ? "active" : ""}
+              onClick={() => go("settings")}
+            >
+              <Megaphone size={18} />
+              公告与下载源
+            </a>
+            <a href="#system" className={section === "system" ? "active" : ""} aria-current={section === "system" ? "page" : undefined} onClick={() => go("system")}>
+              <Settings2 size={18} />系统设置
+            </a>
+          </nav>
+          <div className="sidebar-bottom">
+            <div className="source-state">
+              <span className="status online">
+                <i />
+                {demo
+                  ? "本地预览 · 演示数据"
+                  : state.api?.authenticated
+                    ? "管理服务已连接"
+                    : "等待登录"}
+              </span>
+            </div>
+            <button
+              className="appearance-entry"
+              onClick={() => setAppearance(true)}
+            >
+              <Palette size={17} />
+              <span>外观设置</span>
+              <Settings2 size={15} />
+            </button>
+            {live && state.api?.authenticated && (
+              <button
+                className="token-entry"
+                aria-label="管理访问 Token"
+                onClick={() => setTokenPanel(true)}
+              >
+                <KeyRound size={18} />
+                <span><strong>Token 已连接</strong><small>访问凭证</small></span>
+                <ArrowRightLeft size={15} />
+              </button>
+            )}
+            <small className="sidebar-copyright">让每一次管理更从容</small>
+          </div>
+        </aside>
+        <div className="app-right">
+          <header className="topbar">
+            <div className="topbar-left">
+              <IconButton
+                label="打开导航"
+                onClick={() => setMobileNav(!mobileNav)}
+              >
+                <PanelLeft size={18} />
+              </IconButton>
+              <span className="topbar-root">GM 工作台</span>
+              <ChevronRight size={13} />
+              <strong>{nav.label}</strong>
+            </div>
+            <div className="topbar-actions">
+              {live && state.api?.systemSettings?.carbonMode && (
+                <button
+                  type="button"
+                  className="carbon-pill"
+                  title="点击关闭在线写入（碳铀模式）"
+                  disabled={!!state.api.busy}
+                  onClick={() =>
+                    void live.guard(async () => {
+                      await live.systemSettings(false);
+                      setToast({ text: "已关闭在线写入（碳铀模式）", error: false });
+                    })
+                  }
+                >
+                  <Zap size={14} />
+                  <span>在线写入已开启</span>
+                </button>
+              )}
+              <button
+                type="button"
+                className="topbar-target-pill"
+                title="快速搜索并切换角色或账号 (Ctrl+K)"
+                onClick={() => setPickCharacter(true)}
+              >
+                <Users size={14} />
+                <span>{character.id ? character.name : "选择角色"}</span>
+                <kbd className="kbd-hint">Ctrl+K</kbd>
+              </button>
+              {live && live.operationReceipts().length > 0 && (
+                <button className="secondary" onClick={() => setReceiptPanel(true)}>
+                  操作回执 · {live.operationReceipts().length}
+                </button>
+              )}
+              {hasBatchSelection && (
+                <span className="topbar-selected-pill">
+                  <span>已勾选 {batchRecipients.length} 个收件角色</span>
+                  <button
+                    type="button"
+                    aria-label="清空批量勾选"
+                    title="清空批量勾选"
+                    onClick={() => chooseSelection({ accounts: [], characters: [] })}
+                  >
+                    <X size={13} />
+                  </button>
+                </span>
+              )}
+              <IconButton
+                label={
+                  preferences.theme === "dark" ? "切换浅色主题" : "切换深色主题"
+                }
+                onClick={() =>
+                  setPreferences({
+                    ...preferences,
+                    theme: preferences.theme === "dark" ? "light" : "dark",
+                  })
+                }
+              >
+                {preferences.theme === "dark" ? (
+                  <Sun size={18} />
+                ) : (
+                  <Moon size={18} />
+                )}
+              </IconButton>
+              <IconButton label="外观设置" onClick={() => setAppearance(true)}>
+                <Settings2 size={18} />
+              </IconButton>
+              <button
+                className="primary"
+                onClick={() => {
+                  if (!hasBatchSelection && character.id) {
+                    chooseSelection({ accounts: [], characters: [character.id] });
+                  }
+                  setMailComposeTick((v) => v + 1);
+                  go("mail");
+                }}
+              >
+                <Mail size={15} />
+                {hasBatchSelection ? `发邮件 (${batchRecipients.length})` : "发邮件"}
+              </button>
+            </div>
+          </header>
+          <main id="main-content">
+            <div className="page-head">
+              <div>
+                <p className="eyebrow">PURPLEMAGIC / {section === "query" ? "DASHBOARD" : section.toUpperCase()}</p>
+                <div className="page-title-row">
+                  <h1>{nav.title}</h1>
+                  <span
+                    className="page-loading"
+                    data-loading={!!(state.api?.busy || !!state.api?.reading || !!state.api?.inventory.loading)}
+                    role="status"
+                    aria-label={(state.api?.busy || !!state.api?.reading || !!state.api?.inventory.loading) ? "正在读取" : undefined}
+                    aria-hidden={!(state.api?.busy || !!state.api?.reading || !!state.api?.inventory.loading)}
+                  >
+                    <DelayedSpinner size={20} active={!!(state.api?.busy || state.api?.reading || state.api?.inventory.loading)} />
+                  </span>
+                </div>
+                <p>{nav.sub}</p>
+              </div>
+              <div className="page-head-actions">
+                {fromAntiCheat && (section === "inventory" || section === "gm" || section === "accounts") && (
+                  <button
+                    type="button"
+                    className="secondary back-to-anticheat"
+                    onClick={() => go("anti-cheat")}
+                  >
+                    <ArrowLeft size={14} />
+                    返回反作弊
+                  </button>
+                )}
+                {!["query", "benefits", "activities", "anti-cheat"].includes(section) && (
+                  <button
+                    className="secondary current-target"
+                    onClick={() => setPickCharacter(true)}
+                  >
+                    <Users size={15} />
+                    {character.name}
+                    <ChevronRight size={14} />
+                  </button>
+                )}
+              </div>
+            </div>
+            {!noIdentity &&
+              character.id &&
+              state.api?.authenticated !== false && (
+                <Identity
+                  state={state}
+                  character={character}
+                  onChoose={() => setPickCharacter(true)}
+                  onSelectCharacter={selectCharacter}
+                  onManageAccount={openAccount}
+                  onQuickMail={() => {
+                    if (character.id) {
+                      chooseSelection({ accounts: [], characters: [character.id] });
+                    }
+                    setMailComposeTick((v) => v + 1);
+                    go("mail");
+                  }}
+                />
+              )}
+            {state.api?.error && (
+              <div className="glass live-status" role="alert">
+                <span className="inline-error">{state.api.error}</span>
+                {live?.canEnableCarbonAndRetry() && (
+                  <button
+                    type="button"
+                    className="amber-action-button"
+                    disabled={!!state.api.busy}
+                    onClick={() => void live.guard(() => live.enableCarbonAndRetry())}
+                  >
+                    ⚡ 开启在线写入并重试
+                  </button>
+                )}
+                {live?.repreviewableDungeonQuotaPending() ? (
+                  <button
+                    className="primary"
+                    disabled={!!state.api.busy}
+                    onClick={() => {
+                      const target = live.repreviewableDungeonQuotaPending();
+                      if (target) void live.guard(() => live.repreviewDungeonQuotas(target.id));
+                    }}
+                  >
+                    刷新并重新预览
+                  </button>
+                ) : (
+                  <button
+                    className="secondary"
+                    onClick={() =>
+                      void live?.guard(async () => {
+                        await live.retry();
+                      })
+                    }
+                  >
+                    重试
+                  </button>
+                )}
+              </div>
+            )}
+            <div key={section} className="page-content">
+              {live && !state.api?.authenticated ? (
+                <LoginPanel />
+              ) : live &&
+                !live.current &&
+                !["query", "accounts", "settings", "system", "quests", "mail", "benefits", "activities", "anti-cheat"].includes(section) ? (
+                <div className="glass content-panel empty-character-panel">
+                  <Empty
+                    title="选择一位角色开始管理"
+                    detail="选定后将直接留在当前功能页继续操作"
+                  />
+                  <div className="empty-character-actions">
+                    <button className="primary" onClick={() => setPickCharacter(true)}>
+                      <Search size={15} />
+                      搜索并选择角色 (Ctrl+K)
+                    </button>
+                    <button className="secondary" onClick={() => go("accounts")}>
+                      前往账号与角色目录
+                    </button>
+                  </div>
+                  {!!state.api?.recentCharacters.length && (
+                    <div className="recent-character-section">
+                      <span className="muted">最近访问角色</span>
+                      <div className="recent-character-grid">
+                        {state.api.recentCharacters.map((rc) => (
+                          <button
+                            key={rc.id}
+                            type="button"
+                            className="recent-character-card"
+                            onClick={() => selectCharacter(rc.id)}
+                          >
+                            <strong>{rc.name}</strong>
+                            <small>
+                              Lv.{rc.level} · {rc.job}
+                            </small>
+                            <small className="muted">
+                              {rc.accountName ? `账号 ${rc.accountName}` : `ID ${rc.id}`}
+                            </small>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <>
+                  {section === "inventory" ? (
+                    <Inventory {...props} />
+                  ) : section === "query" ? (
+                    <Dashboard {...props} />
+                  ) : section === "accounts" ? (
+                    <Players {...props} accountMode />
+                  ) : section === "mail" ? (
+                    <MailPage {...props} />
+                  ) : section === "quests" ? (
+                    <QuestPage {...props} />
+                  ) : section === "anti-cheat" ? (
+                    <AntiCheatPage {...props} />
+                  ) : section === "activities" ? (
+                    <ActivitiesPage {...props} />
+                  ) : section === "benefits" ? (
+                    <BenefitsPage {...props} />
+                  ) : section === "system" ? (
+                    <SystemSettings {...props} />
+                  ) : section === "login-codes" ? (
+                    <LoginCodes {...props} />
+                  ) : section === "gm" ? (
+                    <GmPage {...props} />
+                  ) : (
+                    <Settings {...props} />
+                  )}
+                </>
+              )}
+            </div>
+            <footer className="page-footer">
+              <span>PurpleMagic</span>
+              <span>外部 GM · 玩家管理工作台</span>
+            </footer>
+          </main>
+        </div>
+        {toast && (
+          <div
+            className={`toast ${toast.error ? "error" : ""}`}
+            role={toast.error ? "alert" : "status"}
+          >
+            {toast.error ? (
+              <AlertCircle size={18} />
+            ) : (
+              <CheckCircle2 size={18} />
+            )}
+            <span>{toast.text}</span>
+            <button aria-label="关闭提示" onClick={() => setToast(null)}>
+              <X size={15} />
+            </button>
+          </div>
+        )}
+        {pickCharacter && (
+          <Modal
+            title="快速搜索角色或账号"
+            wide
+            onClose={() => setPickCharacter(false)}
+          >
+            <PlayerPicker
+              state={state}
+              selection={selection}
+              setSelection={chooseSelection}
+              pickOnly
+              onChoose={selectCharacter}
+              onManageAccount={(id, name) => {
+                setPickCharacter(false);
+                setManageAccount({ id, name });
+              }}
+            />
+          </Modal>
+        )}
+        {manageAccount && (
+          <AccountManagerModal
+            accountId={manageAccount.id}
+            accountName={manageAccount.name}
+            state={state}
+            request={request}
+            onClose={() => setManageAccount(null)}
+            onSelectCharacter={selectCharacter}
+            go={go}
+          />
+        )}
+        {state.api?.pending && !state.api.pending.hidden && <LiveConfirmation pending={state.api.pending} />}
+        {receiptPanel && live && <OperationHistory onClose={() => setReceiptPanel(false)} />}
+        {tokenPanel && live && <Modal title="访问 Token" onClose={() => setTokenPanel(false)} footer={<>
+          <button className="secondary" onClick={() => setTokenPanel(false)}>保持连接</button>
+          <button className="primary" onClick={() => void live.guard(async () => {
+            await live.logout(); setTokenPanel(false); setCharacterId(""); setSelection({ accounts: [], characters: [] });
+          })}><ArrowRightLeft size={15} />更换 Token</button>
+        </>}><p>清除本机的连接记忆，然后输入新的 Token。</p></Modal>}
+        {pending && (
+          <Modal
+            title={
+              pending.command.kind === "mail" ? "确认发送邮件" : "确认本次修改"
+            }
+            onClose={() => setPending(null)}
+            footer={
+              <>
+                <button className="secondary" onClick={() => setPending(null)}>
+                  取消
+                </button>
+                <button className="primary" onClick={confirm}>
+                  {pending.command.kind === "mail" ? "确认发送" : "确认执行"}
+                </button>
+              </>
+            }
+          >
+            <p className="confirm-target">{pending.target}</p>
+            <p>
+              {pending.summary
+                .replace(/^已/, "")
+                .replace("已自动发放", "自动发放")
+                .replace("已自动检查", "自动检查")}
+            </p>
+            {pending.command.kind === "item" && (
+              <dl className="detail-list">
+                {Object.entries(pending.command.patch).map(([k, v]) => (
+                  <div key={k}>
+                    <dt>
+                      {
+                        {
+                          count: "数量",
+                          enhance: "强化",
+                          amplify: "增幅",
+                          forge: "锻造",
+                          bound: "绑定",
+                        }[k]
+                      }
+                    </dt>
+                    <dd>{typeof v === "boolean" ? (v ? "是" : "否") : v}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+            {pending.command.kind === "mail" && (
+              <>
+                <dl className="detail-list">
+                  <div>
+                    <dt>标题</dt>
+                    <dd>{pending.command.title}</dd>
+                  </div>
+                  <div>
+                    <dt>每角色金币</dt>
+                    <dd>{number(pending.command.gold)}</dd>
+                  </div>
+                  {pending.command.items.map((i) => (
+                    <div key={i.id}>
+                      <dt>{i.name}</dt>
+                      <dd>× {number(i.count)}</dd>
+                    </div>
+                  ))}
+                </dl>
+                <h3>最终收件名单 · {currentRecipients.length} 人</h3>
+                <ul className="confirmation-recipients">
+                  {currentRecipients.map((c) => (
+                    <li key={c.id}>
+                      <strong>{c.name}</strong>
+                      <span>
+                        Lv.{c.level} ·{" "}
+                        {state.accounts.find((a) => a.id === c.accountId)?.name}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {pending.command.kind === "growth" && (
+              <p className="confirm-values">
+                Lv.{pending.command.level} · {pending.command.job} · SP{" "}
+                {pending.command.sp} · TP {pending.command.tp}
+              </p>
+            )}
+            {(pending.command.kind === "rename-character" || pending.command.kind === "rename-adventure") && (
+              <p className="confirm-values">{pending.command.expectedName} → {pending.command.newName}</p>
+            )}
+            {pending.command.kind === "currency" && (
+              <dl className="detail-list">
+                <div>
+                  <dt>金币</dt>
+                  <dd>{number(pending.command.gold)}</dd>
+                </div>
+                <div>
+                  <dt>点券</dt>
+                  <dd>{number(pending.command.points)}</dd>
+                </div>
+                <div>
+                  <dt>代币券</dt>
+                  <dd>{number(pending.command.tokens)}</dd>
+                </div>
+              </dl>
+            )}
+            {pending.command.kind === "delete-items" && (
+              <ul className="confirmation-recipients">
+                {state.items
+                  .filter(
+                    (i) =>
+                      pending.command.kind === "delete-items" &&
+                      pending.command.keys.includes(i.key),
+                  )
+                  .map((i) => (
+                    <li key={i.key}>
+                      {i.name}
+                      <span>× {number(i.count)}</span>
+                    </li>
+                  ))}
+              </ul>
+            )}
+          </Modal>
+        )}
+        {appearance && (
+          <Modal
+            title="外观设置"
+            onClose={() => setAppearance(false)}
+            footer={
+              <button className="primary" onClick={() => setAppearance(false)}>
+                完成
+              </button>
+            }
+          >
+            <div className="theme-choices">
+              <button
+                className={preferences.theme === "dark" ? "active" : ""}
+                onClick={() =>
+                  setPreferences({ ...preferences, theme: "dark" })
+                }
+              >
+                <Moon size={22} />
+                <strong>兰紫夜幕</strong>
+                <span>深色 · 粉紫微光</span>
+              </button>
+              <button
+                className={preferences.theme === "light" ? "active" : ""}
+                onClick={() =>
+                  setPreferences({ ...preferences, theme: "light" })
+                }
+              >
+                <Sun size={22} />
+                <strong>兰紫晨光</strong>
+                <span>浅色 · 淡紫通透</span>
+              </button>
+            </div>
+            <Field label={`面板不透明度 · ${preferences.opacity}%`}>
+              <input
+                aria-label="面板不透明度"
+                type="range"
+                min="50"
+                max="95"
+                value={preferences.opacity}
+                onChange={(e) =>
+                  setPreferences({
+                    ...preferences,
+                    opacity: Number(e.target.value),
+                  })
+                }
+              />
+            </Field>
+            <Field label={`毛玻璃模糊 · ${preferences.blur}px`}>
+              <input
+                aria-label="毛玻璃模糊"
+                type="range"
+                min="0"
+                max="32"
+                value={preferences.blur}
+                onChange={(e) =>
+                  setPreferences({
+                    ...preferences,
+                    blur: Number(e.target.value),
+                  })
+                }
+              />
+            </Field>
+            <label className="checkline">
+              <CheckBox
+                label="显示背景氛围"
+                checked={preferences.background}
+                onChange={() =>
+                  setPreferences({
+                    ...preferences,
+                    background: !preferences.background,
+                  })
+                }
+              />
+              显示背景氛围
+            </label>
+            <label className="checkline">
+              <CheckBox
+                label="紧凑列表"
+                checked={preferences.compact}
+                onChange={() =>
+                  setPreferences({
+                    ...preferences,
+                    compact: !preferences.compact,
+                  })
+                }
+              />
+              紧凑列表
+            </label>
+            <div className="form-divider" />
+            {demo && (
+              <button
+                className="text-button muted"
+                onClick={() => {
+                  setAppearance(false);
+                  setReset(true);
+                }}
+              >
+                <RotateCcw size={15} />
+                重置演示数据
+              </button>
+            )}
+          </Modal>
+        )}
+        {reset && (
+          <Modal
+            title="重置演示数据"
+            onClose={() => setReset(false)}
+            footer={
+              <>
+                <button className="secondary" onClick={() => setReset(false)}>
+                  取消
+                </button>
+                <button
+                  className="primary"
+                  onClick={() => {
+                    setState(initialState());
+                    setSelection({ accounts: [], characters: [] });
+                    setCharacterId("1");
+                    setReset(false);
+                    setToast({ text: "演示数据已重置", error: false });
+                  }}
+                >
+                  重置
+                </button>
+              </>
+            }
+          >
+            <p>恢复示例账号、物品与邮件，并清空本地操作记录。</p>
+          </Modal>
+        )}
+      </div>
+    </LiveContext.Provider>
+  );
+}

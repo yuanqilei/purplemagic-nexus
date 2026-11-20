@@ -1,0 +1,31 @@
+## 2026-10-20 用户简化需求与迁移暂停
+
+诊断界面仅保留开关、最近五次游戏启动日志、逐份导出。导出必须是真正 UTF-8 `.log` 文本，经 Windows 原生另存为选择完整路径；不要恢复问题类型、标记/倒计时/片段勾选。单文件入口 `PurpleMagic.exe`，内部更新文件名、产品标记和缓存兼容契约保持；发现 `.client/` 与 `client/` 时验证客户端文件。
+
+迁移期间暂停线上写入及旧 profile 打包。新服务器、频道、账号 API、签名更新源与最终资源哈希由 Syncer 私有文档提供，客户端基准 `C:/BDown/client/client`。本地构建使用隔离 fixture profile，不能作为玩家版发布。
+
+## 2026-10-20 launcher diagnostics candidate
+
+Launcher 0.2.19 adds optional local enhanced diagnostics. Read `docs/LAUNCHER_DIAGNOSTICS.md` and `docs/diagnostics/VALIDATION.md` before changing collector layouts, lifecycle or export. Keep full EXE hash gating, read-only process permissions, separate sampling/writer/UI notifications, bounded buffers and the existing launcher UI. This candidate has not been published or deployed; native two-hour gameplay and frame-time acceptance remain open.
+
+# PurpleMagic repository guidance
+
+- For update/repair announcements, follow `docs/GM_ANNOUNCEMENT_PUBLISHING.md` and `docs/templates/announcement-*.md`. Summarize each player-visible change as 修复 / 调整 / 新增 / 优化, based on the actual release scope. Keep internal evidence separate from public copy. Use `scripts/gm_announcement.py` and the existing GM session API when publication is authorized; prepare-only tasks produce a draft. Preserve the original request file for retries and verify the saved entry by ID. No RPA is needed for announcement publication.
+
+- Read `docs/FEATURE_LEDGER.md`, `docs/FOUNDATIONS.md`, `docs/ARCHITECTURE.md`, `docs/PROVENANCE.md` and `changlog.md` before choosing a baseline. Preserve existing working-tree changes.
+- `gm-console/` is the only active GM frontend. Its accepted orchid glass design is archived in `docs/design/purplemagic-orchid-20261019/`. Preserve the floating sidebar, capsule header, purple/pink light and dark themes, density and functional grouping. Product text states behavior directly.
+- `gm-web/` is **FROZEN_DO_NOT_REFERENCE**: keep it only for historical builds and provenance. Do not copy, import or restyle its layout or components. The 86jp reference supplies function semantics, not the current visual design.
+- The seven console sections are search, inventory, mail, quests, GM, accounts/characters, and announcements/download sources. Inventory contains bags, equipment, pet equipment, storage, account storage, pets, avatars and emblems.
+- Build and package the frontend from `gm-console/dist/`. Node.js is a development/build dependency; the production frontend is static. Its API adapters live in `gm-console/src/api/`.
+- `gateway/` and `gm/` are independent Go modules. Follow `gm/AGENTS.md` for changes there. Never import source from a neighboring checkout at build time.
+- External GMService owns full PVF indexes, definition lookup, administrator sessions, mail scheduling and benefit scans. Game-side PlayerGateway owns transaction validation, admission checks and durable receipts. Keep public player and private management listeners and authentication separate.
+- Use the actual server schema and binary layouts. Preserve rule IDs, fixed recipient snapshots, idempotency keys and permanent receipts. Selecting an account for mail includes all existing characters; character-specific edits check the target character, while shared assets retain account protection.
+- PVF generations use the complete hash of the operator-approved file. Rebuild and verify indexes after a hash change; do not replace approved assets automatically.
+- Game listeners, game startup and player databases belong to the game service. Forums and public-player snapshots have separate read contracts, authentication and deployment.
+- Runtime configuration, keys, profiles, game assets, generated binaries and private reports stay ignored. Use disposable databases for tests; never grant assets to real players for verification.
+- Validate Go list/test/vet in both modules, module boundary checks and Windows/Linux builds for extraction or Go changes. Database-affecting changes also require the changed module's `scripts/test_mysql.py` with a fresh disposable database.
+- Launcher checks cover Core, EngineTests, PortableTests and Flutter analyze/test. Preserve client directory discovery and channel compatibility; the launcher version is 0.2.19 candidate (based on the released 0.2.18 source).
+- New frontend changes require type checking, build, relevant tests and browser checks against isolated fixtures. Keep accepted design references separate from private screenshots and credentials.
+- Build, Git publication, deployment and native game acceptance are separate actions. Compatible EXE/PVF/dstr/NPK/profile signatures and downloaded hashes must be verified before dependent server deployment.
+- This server delivers launcher APP updates and game resources through Baidu. Before publication, upload new artifacts, fully read them back to verify length/SHA256, and load the preserved hash-to-file registry into the gateway. After publication, require actual gateway 307/provider Range 206, a full APP/current-content download using real launcher assemblies, and a second plan with zero downloads. Follow `docs/LAUNCHER_INPUTS.md`. Credentials and receipts stay private.
+- Windows entrypoints use BAT/Python. Retain third-party license and provenance notices.

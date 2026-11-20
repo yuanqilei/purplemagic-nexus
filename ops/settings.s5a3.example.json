@@ -1,0 +1,24 @@
+{
+  "gmOrigin": "https://<服务器公网IP或域名>",
+  "approvedProfile": "/opt/purplemagic/inputs/profile.json",
+  "signingPrivateKey": "/opt/purplemagic/inputs/private/signing-key.pem",
+  "pvfFile": "/opt/servers5a3/runtime/docker/data/Script.pvf",
+  "playerCertificate": "/opt/purplemagic/inputs/tls-player/server.crt",
+  "playerPrivateKey": "/opt/purplemagic/inputs/tls-player/server.key",
+  "playerCA": "/opt/purplemagic/inputs/tls-player/ca.pem",
+  "webCertificate": "/opt/purplemagic/inputs/tls-web/server.crt",
+  "webPrivateKey": "/opt/purplemagic/inputs/tls-web/server.key",
+  "database": {
+    "registrationDsn": "dnf:<MARIADB_PASSWORD>@tcp(127.0.0.1:23306)/dnf_local?parseTime=true&charset=utf8mb4",
+    "repositoryDsn": "dnf:<MARIADB_PASSWORD>@tcp(127.0.0.1:23306)/dnf_local?parseTime=true&charset=utf8mb4",
+    "accountTable": "dnf90_web_accounts",
+    "databases": ["dnf_local"],
+    "tablePrefix": "dnf"
+  },
+  "game": {
+    "upstream": "http://127.0.0.1:17002",
+    "proxySecret": "<DNFBRIDGE_PLAYER_PROXY_SECRET>",
+    "adminUrl": "http://127.0.0.1:17002/api/game/admin",
+    "adminToken": "<DNFBRIDGE_PLAYER_ADMIN_SECRET>"
+  }
+}

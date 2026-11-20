@@ -1,0 +1,736 @@
+import { activityChanges, demoActivities, type ActivitySnapshot, type ActivityChange } from "./activities.ts";
+export type Section =
+  "query" | "inventory" | "mail" | "quests" | "gm" | "benefits" | "activities" | "anti-cheat" | "accounts" | "settings"
+  | "system" | "login-codes";
+export type InventoryTab =
+  | "bag"
+  | "equipped"
+  | "petbag"
+  | "warehouse"
+  | "account"
+  | "pets"
+  | "avatars"
+  | "emblems";
+export type Character = {
+  id: string;
+  accountId: string;
+  name: string;
+  job: string;
+  level: number;
+  online: boolean | null;
+  jobCode?: string;
+  growType?: number;
+  gold: number;
+  sp: number;
+  tp: number;
+};
+export type Account = {
+  id: string;
+  name: string;
+  adventureName?: string;
+  points: number;
+  tokens: number;
+  status: "正常" | "限制登录";
+  characterCount?: number;
+  rawPoints?: string;
+};
+export type ItemExpiration = { known: boolean; absoluteExpireTime: number; usablePeriodDays: number };
+export type Item = {
+  expiration?: ItemExpiration;
+  key: string;
+  characterId: string;
+  accountId?: string;
+  tab: InventoryTab;
+  slot: number;
+  id: string;
+  name: string;
+  category: string;
+  rarity: "普通" | "高级" | "稀有" | "神器" | "史诗" | "传说";
+  count: number;
+  level: number;
+  enhance: number;
+  amplify: number;
+  forge: number;
+  bound: boolean;
+  version: number;
+  remote?: {
+    appliedRequestId?: string;
+    container: string;
+    revision?: string;
+    pvf?: string;
+    options?: Record<string, any>;
+    attributes?: Record<string, any>;
+    relatedRevision?: string;
+    expiresAt?: string | null;
+    known: boolean;
+    kind?: string;
+    subtype?: string;
+  };
+};
+export type Quest = {
+  id: string;
+  name: string;
+  chapter: string;
+  kind: string;
+  level: number;
+};
+export type Attachment = {
+  expiration?: ItemExpiration;
+  id: string;
+  name: string;
+  count: number;
+  enhance: number;
+  forge?: number;
+  kind?: string;
+  category?: string;
+  subtype?: string;
+};
+export type CeraMode = "add" | "sub" | "set";
+export const MAX_CERA = 9223372036854775807n;
+export function computeCeraAdjustment(currentRaw: string, mode: CeraMode, inputRaw: string): {
+  valid: boolean;
+  current: bigint;
+  delta: bigint;
+  after: bigint;
+  error?: string;
+} {
+  const cleanCurrent = /^\d+$/.test((currentRaw || "").trim()) ? BigInt(currentRaw.trim()) : 0n;
+  const trimmed = (inputRaw || "").trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return { valid: false, current: cleanCurrent, delta: 0n, after: cleanCurrent, error: "请输入有效的非负整数金额" };
+  }
+  const value = BigInt(trimmed);
+  if (value > MAX_CERA) {
+    return { valid: false, current: cleanCurrent, delta: 0n, after: cleanCurrent, error: "金额超出上限" };
+  }
+  if (mode === "add") {
+    if (value <= 0n) return { valid: false, current: cleanCurrent, delta: 0n, after: cleanCurrent, error: "增加金额须大于 0" };
+    if (cleanCurrent > MAX_CERA - value) return { valid: false, current: cleanCurrent, delta: 0n, after: cleanCurrent, error: "变更后点券超出上限" };
+    return { valid: true, current: cleanCurrent, delta: value, after: cleanCurrent + value };
+  }
+  if (mode === "sub") {
+    if (value <= 0n) return { valid: false, current: cleanCurrent, delta: 0n, after: cleanCurrent, error: "扣除金额须大于 0" };
+    if (value > cleanCurrent) return { valid: false, current: cleanCurrent, delta: 0n, after: cleanCurrent, error: "扣除金额超过当前点券余额" };
+    return { valid: true, current: cleanCurrent, delta: -value, after: cleanCurrent - value };
+  }
+  const delta = value - cleanCurrent;
+  if (delta === 0n) {
+    return { valid: false, current: cleanCurrent, delta: 0n, after: cleanCurrent, error: "目标点券与当前余额一致" };
+  }
+  return { valid: true, current: cleanCurrent, delta, after: value };
+}
+export type Mail = {
+  id: string;
+  characterId: string;
+  title: string;
+  body: string;
+  sender: string;
+  gold: number;
+  items: Attachment[];
+  createdAt: string;
+  claimed: boolean;
+};
+export type Receipt = {
+  id: string;
+  kind: string;
+  target: string;
+  summary: string;
+  at: string;
+  details?: Record<string, any>;
+};
+export type DungeonQuotaItem = {
+  key: string;
+  name: string;
+  category: "daily" | "weekly";
+  resetSchedule: string;
+  used: number;
+  limit: number;
+  canReset: boolean;
+  detail: string;
+  templeEntries?: number;
+  templeClears?: number;
+  templeLimit?: number;
+  trialEntries?: number;
+  trialClears?: number;
+  trialLimit?: number;
+};
+export type Benefit = {
+  cera?: number;
+  item?: Attachment;
+  grantScope?: "character" | "account";
+  id: string;
+  name: string;
+  gold: number;
+  enabled: boolean;
+  scope: "existing" | "future";
+  recipients: string[];
+  eligibleIds?: string[];
+  revision?: number;
+  sent?: number;
+  scopeLabel?: string;
+  rewardSummary?: string;
+};
+export type News = {
+  id: string;
+  title: string;
+  body: string;
+  published: boolean;
+  category?: string;
+  date?: string;
+  format?: "text" | "markdown";
+  originId?: string;
+  sourceRevision?: string;
+};
+export type State = {
+  activities?: ActivitySnapshot;
+  api?: import("./api/model").LiveData;
+  schema: 1;
+  accounts: Account[];
+  characters: Character[];
+  items: Item[];
+  mails: Mail[];
+  questStates: Record<string, Record<string, string>>;
+  dungeonQuotas?: Record<string, DungeonQuotaItem[]>;
+  benefits: Benefit[];
+  receipts: Receipt[];
+  news: News[];
+  sources: { download: string; gameHost: string; gamePort: number };
+};
+export type Selection = { accounts: string[]; characters: string[] };
+export type Command =
+  | { kind: "activity-save"; revision: number; activities: ActivityChange[] }
+  | {
+      kind: "item";
+      key: string;
+      version: number;
+      patch: Pick<Item, "count" | "enhance" | "amplify" | "forge" | "bound">;
+      expirationDays?: number;
+    }
+  | { kind: "delete-items"; keys: string[] }
+  | { kind: "replace-item"; key: string; version: number; itemId: string }
+  | { kind: "reset-skill-points"; characterId: string }
+  | { kind: "reset-dungeon-quota"; characterId: string; quotaKey: string }
+  | { kind: "rename-character"; characterId: string; expectedName: string; newName: string }
+  | { kind: "premium-grant"; accountId: string; days: number; standalone?: boolean }
+  | { kind: "rename-adventure"; accountId: string; expectedName: string; newName: string; standalone?: boolean }
+  | { kind: "character-gold"; characterId: string; gold: number }
+  | { kind: "account-currency"; accountId: string; mode: CeraMode; amountText: string; standalone?: boolean }
+  | {
+      kind: "mail";
+      recipients: string[];
+      title: string;
+      body: string;
+      gold: number;
+      items: Attachment[];
+    }
+  | { kind: "delete-mail"; ids: string[] }
+  | {
+      kind: "quest";
+      selectedTargets?: boolean;
+      characterId: string;
+      ids: string[];
+      status: "completed" | "active";
+    }
+  | {
+      kind: "growth";
+      characterId: string;
+      level: number;
+      job: string;
+      sp: number;
+      tp: number;
+    }
+  | {
+      kind: "currency";
+      characterId: string;
+      gold: number;
+      points: number;
+      pointsText?: string;
+      tokens: number;
+    }
+  | {
+      kind: "benefit-create";
+      rewardKind?: "gold" | "cera" | "item";
+      cera?: number;
+      item?: Attachment;
+      grantScope?: "character" | "account";
+      name: string;
+      gold: number;
+      enabled: boolean;
+      scope: "existing" | "future";
+    }
+  | { kind: "benefit-toggle"; id: string }
+  | { kind: "benefit-delete"; id: string }
+  | { kind: "benefit-redeliver"; id: string }
+  | { kind: "task-control"; id: string; action: "resume" | "retry" | "pause" }
+  | { kind: "news-delete"; id: string; sourceRevision?: string }
+  | { kind: "news-move"; id: string; direction: "up" | "down"; sourceRevision?: string }
+  | {
+      kind: "news";
+      id: string;
+      title: string;
+      body: string;
+      published: boolean;
+      category?: string;
+      date?: string;
+      format?: "text" | "markdown";
+      sourceRevision?: string;
+    }
+  | {
+      kind: "sources";
+      download: string;
+      gameHost: string;
+      gamePort: number;
+      source?: {
+        id: string;
+        name: string;
+        endpoint: string;
+        publicKey: string;
+        certificateSha256: string;
+        enabled: boolean;
+      };
+    };
+
+export function resolveRecipients(
+  state: State,
+  selection: Selection,
+): string[] {
+  const accounts = new Set(selection.accounts),
+    ids = new Set(selection.characters);
+  return state.characters
+    .filter((c) => accounts.has(c.accountId) || ids.has(c.id))
+    .map((c) => c.id);
+}
+function integer(n: number, min = 0, max = 2147483647) {
+  if (!Number.isSafeInteger(n) || n < min || n > max)
+    throw new Error(
+      `请输入 ${min.toLocaleString()}–${max.toLocaleString()} 之间的整数`,
+    );
+}
+function offline(s: State, id: string) {
+  const c = s.characters.find((c) => c.id === id);
+  if (!c) throw new Error("角色不存在");
+  if (c.online) throw new Error(`${c.name} 当前在线，请该角色退出后重试`);
+  return c;
+}
+function requireCharacter(s: State, id: string) {
+  const c = s.characters.find((c) => c.id === id);
+  if (!c) throw new Error("角色不存在");
+  return c;
+}
+
+export function benefitReward(command: Extract<Command, { kind: "benefit-create" }>) {
+  if (!command.name.trim()) throw new Error("请填写规则名称");
+  const kind = command.rewardKind || "gold";
+  const grantScope = kind === "cera" ? "account" : command.grantScope || "character";
+  const gold = kind === "gold" ? command.gold : 0;
+  const cera = kind === "cera" ? command.cera || 0 : 0;
+  const item = kind === "item" ? command.item : undefined;
+  if (kind === "item") {
+    if (!item || !/^[1-9]\d*$/.test(item.id)) throw new Error("请输入有效的物品 ID");
+    integer(Number(item.id), 1);
+    integer(item.count, 1);
+  } else integer(kind === "cera" ? cera : gold, 1);
+  const summary = item ? `${item.name || item.id}（${item.id}）× ${item.count.toLocaleString()}` :
+    cera ? `点券 ${cera.toLocaleString()}` : `金币 ${gold.toLocaleString()}`;
+  return { gold, cera, item, grantScope, summary };
+}
+
+export function applyCommand(
+  input: State,
+  command: Command,
+  now = new Date().toISOString(),
+  requestId: string = crypto.randomUUID(),
+): State {
+  if (input.receipts.some((r) => r.id === requestId)) return input;
+  const s = structuredClone(input);
+  let summary = "",
+    target = "";
+  const deliver = (
+    recipients: string[],
+    title: string,
+    body: string,
+    gold: number,
+    items: Attachment[],
+    batchId = requestId,
+  ) => {
+    integer(gold);
+    if (!title.trim()) throw new Error("请填写邮件标题");
+    if (recipients.length === 0) throw new Error("请先选择收件角色");
+    for (const i of items) {
+      integer(i.count, 1, 99999);
+      if (i.enhance !== undefined && !Number.isNaN(i.enhance)) integer(i.enhance, 0, 31);
+      if (i.forge !== undefined && !Number.isNaN(i.forge)) integer(i.forge, 0, 8);
+      if (!i.id) throw new Error("请选择附件物品");
+    }
+    for (const id of [...new Set(recipients)]) {
+      requireCharacter(s, id);
+      s.mails.unshift({
+        id: `${batchId}-${id}`,
+        characterId: id,
+        title,
+        body,
+        sender: "PurpleMagic",
+        gold,
+        items: structuredClone(items),
+        createdAt: now,
+        claimed: false,
+      });
+    }
+  };
+  switch (command.kind) {
+    case "activity-save": {
+      const snapshot = s.activities || structuredClone(demoActivities);
+      if (command.revision !== snapshot.revision) throw new Error("活动配置已更新，请刷新后重新确认");
+      const changes = activityChanges(snapshot, command.activities);
+      for (const change of changes) {
+        const row = snapshot.activities.find((v) => v.id === change.id)!;
+        row.enabled = change.enabled;
+        row.pendingRestart = row.pendingRestart || row.enabled !== row.effectiveEnabled;
+      }
+      snapshot.revision++;
+      snapshot.restartRequired = snapshot.activities.some((v) => v.pendingRestart);
+      s.activities = snapshot;
+      target = "全服游戏活动";
+      summary = changes.map((v) => `${v.name}（#${v.id}）${v.enabled ? "开启" : "关闭"}`).join("；") + " · 配置已保存，游戏服务下次重启生效";
+      break;
+    }
+    case "item": {
+      const item = s.items.find((i) => i.key === command.key);
+      if (!item) throw new Error("物品不存在");
+      if (item.version !== command.version)
+        throw new Error("物品已变更，请重新打开详情");
+      if (item.tab === "account") {
+        if (
+          s.characters.some((c) => c.accountId === item.accountId && c.online)
+        )
+          throw new Error("账号仓库编辑需该账号角色全部离线");
+      } else offline(s, item.characterId);
+      integer(command.patch.count, 1, 99999);
+      integer(command.patch.enhance, 0, 31);
+      integer(command.patch.amplify, 0, 31);
+      integer(command.patch.forge, 0, 8);
+      Object.assign(item, command.patch, { version: item.version + 1 });
+      target = item.name;
+      summary = "已保存物品属性";
+      break;
+    }
+    case "delete-items": {
+      const items = s.items.filter((i) => command.keys.includes(i.key));
+      if (!items.length) throw new Error("请选择物品");
+      for (const i of items) {
+        if (i.tab === "account") {
+          if (s.characters.some((c) => c.accountId === i.accountId && c.online))
+            throw new Error("账号仓库编辑需该账号角色全部离线");
+        } else offline(s, i.characterId);
+      }
+      s.items = s.items.filter((i) => !command.keys.includes(i.key));
+      target = `${items.length} 件物品`;
+      summary = "已删除选中物品";
+      break;
+    }
+    case "mail": {
+      deliver(
+        command.recipients,
+        command.title,
+        command.body,
+        command.gold,
+        command.items,
+      );
+      target = `${new Set(command.recipients).size} 个角色`;
+      summary = `已发送「${command.title}」`;
+      break;
+    }
+    case "delete-mail": {
+      if (!command.ids.length) throw new Error("请选择邮件");
+      s.mails = s.mails.filter((m) => !command.ids.includes(m.id));
+      target = `${command.ids.length} 封邮件`;
+      summary = "已删除选中邮件";
+      break;
+    }
+    case "quest": {
+      const c = offline(s, command.characterId);
+      if (!command.ids.length) throw new Error("请选择任务");
+      s.questStates[c.id] ??= {};
+      for (const id of command.ids) s.questStates[c.id][id] = command.status;
+      target = c.name;
+      summary = `${command.status === "completed" ? "完成" : "重置"} ${command.ids.length} 个任务`;
+      break;
+    }
+    case "premium-grant": {
+      const account = s.accounts.find(a => a.id === command.accountId);
+      if (!account) throw new Error("账号不存在");
+      if (!Number.isInteger(command.days) || command.days < 1 || command.days > 3650) throw new Error("请输入 1–3650 天");
+      target = account.name; summary = `黑钻贵族续期 ${command.days} 天`;
+      break;
+    }
+    case "reset-dungeon-quota": {
+      const c = offline(s, command.characterId);
+      const list = s.dungeonQuotas?.[c.id] || [];
+      const entry = list.find((item) => item.key === command.quotaKey);
+      if (!entry) throw new Error("请选择有效的副本额度重置项");
+      if (!entry.canReset || entry.used <= 0) throw new Error("当前副本未消耗次数，无需重置");
+      entry.used = 0;
+      entry.canReset = false;
+      if (entry.key === "pandemonium_rift") {
+        entry.detail = "下次入场消耗 2 个精炼的时空石";
+      } else if (entry.key === "echon") {
+        entry.templeEntries = 0;
+        entry.templeClears = 0;
+        entry.trialEntries = 0;
+        entry.trialClears = 0;
+        entry.detail = `遗落的神殿 0/${entry.templeLimit ?? 3}（已通关 0/${entry.templeLimit ?? 3}） · 试炼 0/${entry.trialLimit ?? 1}`;
+      }
+      target = c.name;
+      summary = `已重置「${entry.name}」已用次数（0/${entry.limit}）`;
+      break;
+    }
+    case "rename-character": {
+      const c = offline(s, command.characterId);
+      const name = command.newName.trim();
+      if (c.name !== command.expectedName) throw new Error("角色名已变化，请刷新后重试");
+      if (!name || name.length > 12) throw new Error("请输入有效的角色名");
+      if (s.characters.some(v => v.id !== c.id && v.name === name)) throw new Error("角色名已被使用");
+      target = c.name;
+      summary = `${c.name} → ${name}`;
+      c.name = name;
+      break;
+    }
+    case "rename-adventure": {
+      const a = s.accounts.find(a => a.id === command.accountId);
+      if (!a) throw new Error("账号不存在");
+      if (s.characters.some(c => c.accountId === a.id && c.online !== false)) throw new Error("请先退出该账号的游戏连接");
+      const current = a.adventureName || "";
+      const name = command.newName.trim();
+      if (!current) throw new Error("请先在游戏内创建冒险团");
+      if (current !== command.expectedName) throw new Error("冒险团名已变化，请刷新后重试");
+      if (!name || name.length > 16 || /[\s\p{Cc}]/u.test(name)) throw new Error("请输入有效的冒险团名");
+      if (s.accounts.some(v => v.id !== a.id && v.adventureName?.toLowerCase() === name.toLowerCase())) throw new Error("冒险团名已被使用");
+      target = a.name;
+      summary = `冒险团：${current} → ${name}`;
+      a.adventureName = name;
+      break;
+    }
+    case "growth": {
+      const c = offline(s, command.characterId);
+      integer(command.level, 1, 90);
+      integer(command.sp, 0, 99999);
+      integer(command.tp, 0, 999);
+      if (!command.job.trim()) throw new Error("请选择职业");
+      Object.assign(c, {
+        level: command.level,
+        job: command.job,
+        sp: command.sp,
+        tp: command.tp,
+      });
+      target = c.name;
+      summary = "已保存角色成长";
+      break;
+    }
+    case "character-gold": {
+      const c = offline(s, command.characterId);
+      integer(command.gold);
+      c.gold = command.gold;
+      target = c.name;
+      summary = `金币 → ${command.gold.toLocaleString()}`;
+      break;
+    }
+    case "account-currency": {
+      const a = s.accounts.find((a) => a.id === command.accountId);
+      if (!a) throw new Error("账号不存在");
+      const currentRaw = a.rawPoints && /^\d+$/.test(a.rawPoints)
+        ? a.rawPoints
+        : String(Number.isFinite(a.points) ? a.points : 0);
+      const calc = computeCeraAdjustment(currentRaw, command.mode, command.amountText);
+      if (!calc.valid) throw new Error(calc.error || "点券金额无效");
+      a.rawPoints = calc.after.toString();
+      a.points = Number(calc.after <= BigInt(Number.MAX_SAFE_INTEGER) ? calc.after : Number.MAX_SAFE_INTEGER);
+      target = a.name;
+      summary = `点券 ${calc.current.toLocaleString()} → ${calc.after.toLocaleString()}`;
+      break;
+    }
+    case "currency": {
+      const c = offline(s, command.characterId);
+      const a = s.accounts.find((a) => a.id === c.accountId)!;
+      integer(command.gold);
+      integer(command.points);
+      integer(command.tokens);
+      c.gold = command.gold;
+      a.points = command.points;
+      a.tokens = command.tokens;
+      target = c.name;
+      summary = "已保存金币与账号点券";
+      break;
+    }
+    case "benefit-create": {
+      const reward = benefitReward(command);
+      const b: Benefit = {
+        id: requestId,
+        name: command.name,
+        gold: reward.gold,
+        cera: reward.cera,
+        item: reward.item,
+        grantScope: reward.grantScope,
+        scopeLabel: reward.grantScope === "account" ? "每账号一次" : "每角色一次",
+        rewardSummary: reward.summary,
+        enabled: command.enabled,
+        scope: command.scope,
+        recipients: [],
+        eligibleIds: s.characters.map((c) => c.id),
+      };
+      s.benefits.unshift(b);
+      target = b.name;
+      summary = b.enabled ? "规则已启用，已自动发放" : "规则已保存";
+      break;
+    }
+    case "benefit-redeliver": {
+      throw new Error("请连接服务后补发福利");
+    }
+    case "benefit-delete": {
+      const b = s.benefits.find(b => b.id === command.id);
+      if (!b) throw new Error("规则不存在");
+      target = b.name; summary = "福利规则已删除";
+      s.benefits = s.benefits.filter(b => b.id !== command.id);
+      break;
+    }
+    case "benefit-toggle": {
+      const b = s.benefits.find((b) => b.id === command.id);
+      if (!b) throw new Error("规则不存在");
+      b.enabled = !b.enabled;
+      target = b.name;
+      summary = b.enabled ? "规则已启用，已自动检查收件名单" : "规则已暂停";
+      break;
+    }
+    case "news-delete": {
+      const n = s.news.find(n => n.id === command.id);
+      if (!n) throw new Error("公告已删除");
+      s.news = s.news.filter(n => n.id !== command.id);
+      target = n.title; summary = "公告已删除"; break;
+    }
+    case "news-move": {
+      const i = s.news.findIndex(n => n.id === command.id), j = i + (command.direction === "up" ? -1 : 1);
+      if (i >= 0 && j >= 0 && j < s.news.length) [s.news[i], s.news[j]] = [s.news[j], s.news[i]];
+      target = "公告列表"; summary = "公告顺序已更新"; break;
+    }
+    case "news": {
+      if (!command.title.trim() || !command.body.trim())
+        throw new Error("请填写公告标题和正文");
+      const n = s.news.find((n) => n.id === command.id);
+      if (n)
+        Object.assign(n, {
+          title: command.title,
+          body: command.body,
+          category: command.category, date: command.date, format: command.format,
+          published: command.published,
+        });
+      else
+        s.news.unshift({
+          id: requestId,
+          title: command.title,
+          body: command.body,
+          category: command.category, date: command.date, format: command.format,
+          published: command.published,
+        });
+      target = command.title;
+      summary = command.published ? "公告已发布" : "公告草稿已保存";
+      break;
+    }
+    case "sources": {
+      let u: URL;
+      try {
+        u = new URL(command.download);
+      } catch {
+        throw new Error("请填写有效的下载源 URL");
+      }
+      if (!["https:", "http:"].includes(u.protocol))
+        throw new Error("下载源必须使用 HTTP 或 HTTPS");
+      if (!command.gameHost.trim() || /[\s/]/.test(command.gameHost))
+        throw new Error("请填写有效的游戏地址");
+      integer(command.gamePort, 1, 65535);
+      s.sources = {
+        download: u.href,
+        gameHost: command.gameHost,
+        gamePort: command.gamePort,
+      };
+      target = "公告与下载源";
+      summary = "连接配置已保存";
+      break;
+    }
+  }
+  // The local fixture simulates the server scheduler when a rule is created/enabled.
+  if (command.kind === "benefit-create" || command.kind === "benefit-toggle")
+    for (const b of s.benefits.filter((b) => b.enabled)) {
+      let pending = s.characters.filter(
+        (c) =>
+          !b.recipients.includes(c.id) &&
+          (b.scope === "future" || b.eligibleIds?.includes(c.id)),
+      );
+      if (b.grantScope === "account") {
+        const accounts = new Set(b.recipients.map((id) => s.characters.find((c) => c.id === id)?.accountId));
+        pending = pending.filter((c) => {
+          if (accounts.has(c.accountId)) return false;
+          accounts.add(c.accountId);
+          return true;
+        });
+      }
+      if (pending.length) {
+        if (b.cera) for (const c of pending) {
+          const account = s.accounts.find((a) => a.id === c.accountId)!;
+          account.points += b.cera;
+        }
+        deliver(
+          pending.map((c) => c.id),
+          b.name,
+          b.cera ? `点券 ${b.cera} 已存入账号。` : "福利奖励已送达。",
+          b.gold,
+          b.item ? [b.item] : [],
+          `${requestId}-${b.id}`,
+        );
+        b.recipients.push(...pending.map((c) => c.id));
+      }
+    }
+  s.receipts.unshift({
+    id: requestId,
+    kind: command.kind,
+    target,
+    summary,
+    at: now,
+  });
+  return s;
+}
+
+export function isDirectCommand(
+  command: Command,
+  state?: Pick<State, "news">,
+  selection: Selection = { accounts: [], characters: [] },
+): boolean {
+  switch (command.kind) {
+    case "reset-dungeon-quota":
+    case "item":
+    case "growth":
+    case "reset-skill-points":
+    case "character-gold":
+    case "account-currency":
+    case "currency":
+    case "premium-grant":
+    case "activity-save":
+    case "benefit-toggle":
+    case "task-control":
+    case "news":
+    case "news-move":
+      return true;
+    case "quest":
+      return !command.selectedTargets;
+    case "mail":
+      return (
+        (selection?.accounts?.length || 0) === 0 &&
+        (selection?.characters?.length || 0) <= 1 &&
+        (command.recipients?.length || 0) <= 1
+      );
+    case "news-delete": {
+      const target = state?.news?.find((n) => n.id === command.id);
+      return !!(target && !target.published);
+    }
+    default:
+      return false;
+  }
+}
