@@ -8,6 +8,10 @@
 
 部署前必须执行 `--init-management-schema` 创建独立礼包表，然后重新构建网关、GM Console 与登录器。现有游戏服基础兑换模块没有直接装配到邮件链路，本候选在网关复用实际邮件仓储。尚未自动发布二进制或修改线上数据库。
 
-未完成验收：当前开发机缺少 Go、npm、.NET SDK 和 Flutter；直接执行前端现有测试，15 项通过，20 个文件因缺少依赖无法加载。没有完成类型检查、Go 编译、MariaDB 并发事务测试、浏览器检查或真机验收。此状态不能作为生产发布依据。
+开发验证已补齐临时 Go 1.26.5、npm 和 .NET 8 SDK：GM Console 类型检查和生产构建通过，既有 166 项测试通过，并新增礼包表单独立渲染测试；网关、管理装配和礼包接口编译通过，礼包参数及鉴权专项测试、受影响包 `go vet` 通过；登录器 Engine、Host 使用隔离配置编译通过，Core 155 项安全检查与 Portable 14 项检查通过。
+
+EngineTests 补齐临时 Python/jsonschema 后运行到既有 QQ 绑定断言失败：测试期望 `EnableQQBinding=true` 可显示绑定入口，而当前基线 `LauncherEngine.State` 固定 `QQBindingEnabled=false`。`eb9933f` 中已有同样行为，本轮没有修改 QQ 绑定策略。因此不宣称 EngineTests 全套通过。
+
+新增 `TestGiftMySQLConcurrentAllowanceAndReplay` 覆盖公共口令并发限额、停用后的受理重试、角色切换拒绝和已完成回执重放。当前未配置 `DNFBRIDGE_PLAYER_TEST_DSN`，该项以及既有数据库邮件事务测试跳过。网关整包测试曾长时间未结束而中止，不能宣称整包回归通过。Flutter analyze/test、浏览器交互和真机验收尚未完成。此状态不能作为生产发布依据。
 
 验收重点：随机码只能领取一次；同活动不同码不能重复领；公共口令多账号并发遵守总额度；过期/停用/外账号角色拒绝；并发重试和邮件提交后断线不重复发奖；数据库不可用时不放行；重启后待发放记录可恢复。
