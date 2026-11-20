@@ -27,6 +27,14 @@ def openssl(*args):
     return result.stdout
 
 
+IPV4 = re.compile(r'\d{1,3}(?:\.\d{1,3}){3}')
+
+
+def san_check(hostname):
+    """openssl checks DNS SANs with -checkhost and IP SANs with -checkip."""
+    return ('-checkip', hostname) if IPV4.fullmatch(hostname) else ('-checkhost', hostname)
+
+
 def write(path, value):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -75,7 +83,8 @@ def prepare(settings, output, uid=None, gid=None):
                                 ('webCertificate', 'webPrivateKey', domain.hostname)]:
         if openssl('x509', '-in', inputs[cert], '-pubkey', '-noout') != openssl('pkey', '-in', inputs[key], '-pubout'):
             raise ValueError('Certificate and private key do not match')
-        if b'does match certificate' not in openssl('x509', '-in', inputs[cert], '-noout', '-checkhost', hostname):
+        if b'does match certificate' not in openssl('x509', '-in', inputs[cert], '-noout',
+                                                   *san_check(hostname)):
             raise ValueError('Certificate does not cover its configured hostname')
     database = settings['database']
     if set(database) != {'registrationDsn', 'repositoryDsn', 'accountTable', 'databases', 'tablePrefix'}:
