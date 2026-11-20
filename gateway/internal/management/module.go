@@ -227,3 +227,5 @@ func (m *Module) Close() error {
 func (m *Module) HubSessionGuard(next http.Handler) http.Handler {
 	return m.server.HubHandler(next)
 }
+
+func(m *Module) PublicGiftHandler()http.Handler{return m.server.PublicGiftHandler()}

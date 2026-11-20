@@ -57,6 +57,10 @@ async Task Dispatch(Request request)
             case "update": await engine.UpdateContent(); break;
             case "pause": engine.Pause(); break;
             case "preferences": await engine.SavePreferences(request.Args.Deserialize(WireJson.Default.Preferences) ?? throw new InvalidDataException()); break;
+            case "giftCharacters":
+            case "giftRedeem":
+                var giftResult=await engine.Gift(request.Method=="giftCharacters"?"":request.Args.GetProperty("characterId").GetString()!,request.Method=="giftCharacters"?"":request.Args.GetProperty("code").GetString()!);
+                Respond(new(request.Id,true,State:engine.State,AccountResult:giftResult));return;
             case "register": await engine.Register(request.Args.Deserialize(WireJson.Default.Credentials) ?? throw new InvalidDataException()); break;
             case "login": await engine.Login(request.Args.Deserialize(WireJson.Default.Credentials) ?? throw new InvalidDataException()); break;
             case "bindingCode":

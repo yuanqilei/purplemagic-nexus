@@ -296,7 +296,7 @@ func runGateway(ctx context.Context, c config) error {
 	var servers []*http.Server
 	if c.Listen != "" {
 		var codes *logincodes.Store; if module!=nil { codes=module.LoginCodes }
-		servers = append(servers, &http.Server{Addr: c.Listen, Handler: handlerWithCodes(c, hub, codes), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 6 * time.Hour, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192, TLSConfig: tlsConfig})
+		servers = append(servers, &http.Server{Addr: c.Listen, Handler: withPlayerGifts(handlerWithCodes(c, hub, codes), module), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 6 * time.Hour, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192, TLSConfig: tlsConfig})
 	}
 	if c.QQBotListen != "" {
 		host, _, e := net.SplitHostPort(c.QQBotListen)
@@ -369,3 +369,5 @@ func runGateway(ctx context.Context, c config) error {
 		return errors.New("gateway listener stopped")
 	}
 }
+
+func withPlayerGifts(next http.Handler,m *management.Module)http.Handler{return http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){if strings.HasPrefix(r.URL.Path,"/api/gifts/"){if m==nil{http.Error(w,"礼包服务不可用",503);return};m.PublicGiftHandler().ServeHTTP(w,r);return};next.ServeHTTP(w,r)})}

@@ -43,5 +43,6 @@ func InitializeSchema(ctx context.Context, cfg Config) error {
 	codes, err := logincodes.NewStore(registration, cfg.AccountTable)
 	if err != nil { return err }
 	if err = codes.EnsureSchema(ctx); err != nil { return errors.New("registration-code schema initialization failed") }
+	if err = codes.EnsureGiftSchema(ctx); err != nil { return err }
 	return nil
 }

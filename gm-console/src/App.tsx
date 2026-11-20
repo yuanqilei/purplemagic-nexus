@@ -52,6 +52,7 @@ import { AntiCheatPage } from "./pages/AntiCheat";
 import { ActivitiesPage } from "./pages/Activities";
 import { BenefitsPage } from "./pages/Benefits";
 import { SystemSettings } from "./pages/SystemSettings";
+import { Gifts } from "./pages/Gifts";
 import { LoginCodes } from "./pages/LoginCodes";
 import { shouldRefreshOnVisibility } from "./api/http";
 import { Settings } from "./pages/Settings";
@@ -118,6 +119,7 @@ const navigation = [
     sub: "维护公告、更新资源地址与游戏连接。",
   },
   { id: "system", label: "系统设置", icon: Settings2, title: "系统设置", sub: "配置 GM 工作台的全局行为。" },
+  { id: "gifts", label: "礼包兑换", icon: KeyRound, title: "礼包兑换管理", sub: "生成 CDK、公共口令并追踪发放。" },
   { id: "login-codes", label: "注册码", icon: KeyRound, title: "注册码管理", sub: "批量发放注册码并查看绑定状态。" },
 ] as const;
 const preferenceKey = "purplemagic-glass-appearance-v1";
@@ -366,7 +368,7 @@ export function App() {
             pending.command.recipients.includes(c.id),
         )
       : [];
-  const noIdentity = ["query", "accounts", "settings", "system", "benefits", "activities", "anti-cheat", "login-codes"].includes(section);
+  const noIdentity = ["query", "accounts", "settings", "system", "benefits", "activities", "anti-cheat", "login-codes", "gifts"].includes(section);
   if (live && !state.api?.authenticated) {
     return <LiveContext.Provider value={live}>
       <div className="app-shell auth-shell">
@@ -666,7 +668,7 @@ export function App() {
                 <LoginPanel />
               ) : live &&
                 !live.current &&
-                !["query", "accounts", "settings", "system", "quests", "mail", "benefits", "activities", "anti-cheat", "login-codes"].includes(section) ? (
+                !["query", "accounts", "settings", "system", "quests", "mail", "benefits", "activities", "anti-cheat", "login-codes", "gifts"].includes(section) ? (
                 <div className="glass content-panel empty-character-panel">
                   <Empty
                     title="选择一位角色开始管理"
@@ -725,7 +727,9 @@ export function App() {
                     <BenefitsPage {...props} />
                   ) : section === "system" ? (
                     <SystemSettings {...props} />
-                  ) : section === "login-codes" ? (
+                  ) : section === "gifts" ? (
+ <Gifts {...props} />
+ ) : section === "login-codes" ? (
                     <LoginCodes {...props} />
                   ) : section === "gm" ? (
                     <GmPage {...props} />

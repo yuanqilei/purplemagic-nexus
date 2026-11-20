@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui';
@@ -664,6 +665,7 @@ class _PreviewHomeState extends State<PreviewHome> {
             ],
           ),
           const SizedBox(height: 15),
+          Align(alignment: Alignment.centerRight, child: TextButton(onPressed: () => _gift(), child: const Text('礼包兑换'))),
           if (accountTab >= 2)
             AccountSecurityPanel(
               key: ValueKey(accountTab),
@@ -1084,6 +1086,16 @@ class _PreviewHomeState extends State<PreviewHome> {
     }
   }
 
+  Future<void> _gift() async {
+    try {
+      final response=jsonDecode(await model.gift('','')) as Map;
+      final characters=(response['data'] as List).cast<Map>();
+      if(!mounted)return;
+      if(characters.isEmpty){await _article('礼包兑换','请先创建角色。');return;}
+      String selected=characters.first['id'].toString(),code='';bool sending=false;String message='';
+      await showDialog<void>(context:context,builder:(dialogContext)=>StatefulBuilder(builder:(context,update)=>AlertDialog(title:const Text('礼包兑换'),content:Column(mainAxisSize:MainAxisSize.min,children:[DropdownButton<String>(value:selected,items:characters.map((c)=>DropdownMenuItem<String>(value:c['id'].toString(),child:Text(c['name'].toString()))).toList(),onChanged:sending?null:(v)=>update(()=>selected=v!)),TextField(decoration:const InputDecoration(labelText:'CDK 或公共口令'),onChanged:(v)=>code=v,enabled:!sending),Text(message)]),actions:[TextButton(onPressed:sending?null:()=>Navigator.pop(dialogContext),child:const Text('关闭')),TextButton(onPressed:sending?null:()async{update(()=>sending=true);try{await model.gift(selected,code);if(context.mounted)update(()=>message='兑换成功，请在游戏邮件中领取。');}catch(e){if(context.mounted)update(()=>message=e.toString());}finally{if(context.mounted)update(()=>sending=false);}},child:Text(sending?'正在兑换…':'兑换'))])));
+    }catch(e){if(mounted)await _article('礼包兑换',e.toString());}
+  }
   void _accountSecurity(bool changing) {
     if (submitting || securityBusy || (!changing && !model.qqBindingEnabled)) {
       return;

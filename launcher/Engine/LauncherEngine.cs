@@ -13,6 +13,23 @@ namespace Dnf90.Launcher;
 
 public sealed class LauncherEngine : IDisposable
 {
+    private string? giftToken;
+    public async Task<LoginReply> Gift(string characterId, string code)
+    {
+        if (string.IsNullOrEmpty(giftToken)) throw new InvalidOperationException("请先登录并启动一次游戏，再兑换礼包。");
+        using var api = new PlayerApi(Profile);
+        using var request = new System.Net.Http.HttpRequestMessage(characterId.Length == 0 ? System.Net.Http.HttpMethod.Get : System.Net.Http.HttpMethod.Post, Profile.ApiUrl + (characterId.Length == 0 ? "/api/gifts/characters" : "/api/gifts/redeem"));
+        request.Headers.Authorization = new("Bearer", giftToken);
+        if (characterId.Length != 0) {
+            using var buffer = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(buffer)) { writer.WriteStartObject(); writer.WriteString("characterId", characterId); writer.WriteString("code", code); writer.WriteEndObject(); }
+            request.Content = new System.Net.Http.ByteArrayContent(buffer.ToArray()); request.Content.Headers.ContentType = new("application/json");
+        }
+        using var response = await api.Http.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode) throw new InvalidOperationException(body.Length > 200 ? "礼包请求失败，请稍后重试。" : body);
+        return new LoginReply(true, null, null, body);
+    }
     public const string VersionText = "1.0.16";
     public const string ContentCapabilitiesHeader = "X-DNF90-Content-Capabilities";
     public const string ContentCapabilities = "native-plugins-v1";
@@ -371,6 +388,7 @@ public sealed class LauncherEngine : IDisposable
             Emit("logging-in", "正在验证账号…"); using var api = new PlayerApi(Profile, status => diagnostics.Event("account_http_response", number: status), trace => diagnostics.RecordHttpTrace(trace));
             var correlation = preferences.Diagnostics is { Enabled: true, HasConsent: true } ? Guid.NewGuid().ToString("N") : null;
             var reply = await api.Submit("login", input.Account.Trim(), input.Password, Device(), diagnosticCorrelationId: correlation);
+            giftToken=reply.Token;
             if (correlation is not null) diagnostics.LoginContext(Profile, correlation, reply.Diagnostics);
             diagnostics.Event("account_verified", stageClock.Elapsed.TotalMilliseconds); stageClock.Restart();
             NativeChannelHistory.Prepare(Profile, channels);

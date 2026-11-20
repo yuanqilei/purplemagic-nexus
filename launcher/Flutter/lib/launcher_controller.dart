@@ -202,6 +202,7 @@ class LauncherController extends ChangeNotifier {
     return Map<String, dynamic>.from(reply['accountResult'] as Map? ?? {});
   }
 
+  Future<String> gift(String characterId,String code) async {final r=await client.call(characterId.isEmpty?'giftCharacters':'giftRedeem',{'characterId':characterId,'code':code});return ((r['accountResult'] as Map?)?['message']??'').toString();}
   String clientDirectory = '', account = '';
   String savedPassword = '';
   bool rememberAccount = true;

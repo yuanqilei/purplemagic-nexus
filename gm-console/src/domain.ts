@@ -1,7 +1,7 @@
 import { activityChanges, demoActivities, type ActivitySnapshot, type ActivityChange } from "./activities.ts";
 export type Section =
   "query" | "inventory" | "mail" | "quests" | "gm" | "benefits" | "activities" | "anti-cheat" | "accounts" | "settings"
-  | "system" | "login-codes";
+  | "system" | "login-codes" | "gifts";
 export type InventoryTab =
   | "bag"
   | "equipped"
