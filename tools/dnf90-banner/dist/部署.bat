@@ -38,6 +38,15 @@ if not exist "%GAME%\ijl15_orig.dll" (
 copy /y "%~dp0ijl15.dll" "%GAME%\ijl15.dll" >nul
 echo [3/3] 已替换 ijl15.dll
 
+if exist "%GAME%\banner_cfg.txt" (
+    if not exist "%GAME%\banner_cfg.txt.bak" (
+        copy /y "%GAME%\banner_cfg.txt" "%GAME%\banner_cfg.txt.bak" >nul
+        echo       已备份原 banner_cfg.txt
+    )
+) else (
+    >"%GAME%\.dnf90_banner_cfg_created" echo created
+)
+
 if exist "%~dp0banner_cfg.txt" (
     copy /y "%~dp0banner_cfg.txt" "%GAME%\banner_cfg.txt" >nul
     echo       配置 banner_cfg.txt 已复制
