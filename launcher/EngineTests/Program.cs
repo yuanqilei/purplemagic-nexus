@@ -82,6 +82,8 @@ try
     var envelope = Sign(bootstrap);
     using(var disabledBindingEngine = new LauncherEngine(root,Path.Combine(temp,"binding-build-default"))) {
         Check(!disabledBindingEngine.State.QQBindingEnabled,"open-source build hides binding by default");
+        await RejectAsync(()=>disabledBindingEngine.Gift("", ""),"gift character lookup requires a successful login");
+        await RejectAsync(()=>disabledBindingEngine.Gift("1", "fixture-code"),"gift redemption cannot run without authenticated player identity");
         await RejectAsync(()=>disabledBindingEngine.AccountSecurity("binding-code",new("player","fixture-password","")),"disabled build cannot request a binding code");
     }
     var featureDir=Path.Combine(temp,"binding-feature-build");Directory.CreateDirectory(featureDir);
@@ -89,7 +91,7 @@ try
     using(var disabledBindingEngine = new LauncherEngine(root,featureDir))
         Check(!disabledBindingEngine.State.QQBindingEnabled,"signed profile cannot enable a feature disabled at build time");
     using(var optionalBindingEngine = new LauncherEngine(root with {EnableQQBinding=true},Path.Combine(temp,"binding-optional-build")))
-        Check(optionalBindingEngine.State.QQBindingEnabled&&!optionalBindingEngine.State.RequireQQBinding,"binding entry is available without mandatory login binding");
+        Check(!optionalBindingEngine.State.QQBindingEnabled&&!optionalBindingEngine.State.RequireQQBinding,"registration-code build keeps retired QQ binding disabled even when legacy profile enables it");
 
     foreach (var required in new[] { false, true })
     {
@@ -97,7 +99,7 @@ try
         Directory.CreateDirectory(policyDir);
         File.WriteAllBytes(Path.Combine(policyDir, "bootstrap.json"), Sign(bootstrap with { Profile = root with { RequireQQBinding = required } }));
         using var policyEngine = new LauncherEngine(root with { RequireQQBinding = !required }, policyDir);
-        Check(policyEngine.State.RequireQQBinding == required, "verified server binding policy overrides embedded default: " + required);
+        Check(!policyEngine.State.QQBindingEnabled && !policyEngine.State.RequireQQBinding, "legacy signed QQ policy cannot restore retired binding requirement: " + required);
     }
 
     Check(Trust.Verify(envelope, root).Content!.Files.Length == 2, "own PSS bootstrap and content contract");

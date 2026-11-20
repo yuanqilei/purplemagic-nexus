@@ -16,10 +16,11 @@ public sealed class LauncherEngine : IDisposable
     private string? giftToken;
     public async Task<LoginReply> Gift(string characterId, string code)
     {
-        if (string.IsNullOrEmpty(giftToken)) throw new InvalidOperationException("请先登录并启动一次游戏，再兑换礼包。");
+        var token = giftToken;
+        if (string.IsNullOrEmpty(token)) throw new InvalidOperationException("请先登录并启动一次游戏，再兑换礼包。");
         using var api = new PlayerApi(Profile);
         using var request = new System.Net.Http.HttpRequestMessage(characterId.Length == 0 ? System.Net.Http.HttpMethod.Get : System.Net.Http.HttpMethod.Post, Profile.ApiUrl + (characterId.Length == 0 ? "/api/gifts/characters" : "/api/gifts/redeem"));
-        request.Headers.Authorization = new("Bearer", giftToken);
+        request.Headers.Authorization = new("Bearer", token);
         if (characterId.Length != 0) {
             using var buffer = new MemoryStream();
             using (var writer = new Utf8JsonWriter(buffer)) { writer.WriteStartObject(); writer.WriteString("characterId", characterId); writer.WriteString("code", code); writer.WriteEndObject(); }
@@ -349,6 +350,7 @@ public sealed class LauncherEngine : IDisposable
 #endif
         try
         {
+            giftToken = null;
             diagnostics.Event("login_started");
             var stageClock = Stopwatch.StartNew();
             RequireContentSupport(Profile);

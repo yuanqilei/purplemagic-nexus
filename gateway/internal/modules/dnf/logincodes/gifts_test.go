@@ -115,4 +115,36 @@ func TestGiftMySQLConcurrentAllowanceAndReplay(t *testing.T) {
 	if err != nil || again.Status != "delivered" || again.MailID != "mail-1" {
 		t.Fatalf("delivered replay lost: %v %v", again, err)
 	}
+	batch, err := s.CreateGifts(ctx, Gift{Name: "随机礼包", Campaign: "random", MaxUses: 1, StartsAt: time.Now().Add(-time.Minute), EndsAt: time.Now().Add(time.Hour), Reward: []byte(`{}`)}, 2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.ReserveGift(ctx, batch[0], "same-account", "1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.ReserveGift(ctx, batch[1], "same-account", "1"); err == nil {
+		t.Fatal("second code bypassed campaign account limit")
+	}
+	if _, _, err = s.ReserveGift(ctx, batch[0], "other-account", "2"); err == nil {
+		t.Fatal("single-use CDK reused by another account")
+	}
+	if _, _, err = s.ReserveGift(ctx, batch[1], "other-account", "2"); err != nil {
+		t.Fatal("rejected claim consumed another code", err)
+	}
+	if _, err = db.Exec("CREATE TABLE accounts_tokens(token VARCHAR(64) PRIMARY KEY,account_id VARCHAR(64),expires_at DATETIME)"); err != nil {
+		t.Fatal(err)
+	}
+	token := "de509f65000000000000000000000000"
+	if _, err = db.Exec("INSERT INTO accounts_tokens VALUES (?,?,UTC_TIMESTAMP()+INTERVAL 1 HOUR)", token, "authenticated-account"); err != nil {
+		t.Fatal(err)
+	}
+	if id, e := s.GiftAccount(ctx, token); e != nil || id != "authenticated-account" {
+		t.Fatalf("token identity: %q %v", id, e)
+	}
+	if _, err = db.Exec("UPDATE accounts_tokens SET expires_at=UTC_TIMESTAMP()-INTERVAL 1 SECOND"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.GiftAccount(ctx, token); err == nil {
+		t.Fatal("expired token accepted")
+	}
 }
