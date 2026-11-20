@@ -366,7 +366,7 @@ export function App() {
             pending.command.recipients.includes(c.id),
         )
       : [];
-  const noIdentity = ["query", "accounts", "settings", "system", "benefits", "activities", "anti-cheat"].includes(section);
+  const noIdentity = ["query", "accounts", "settings", "system", "benefits", "activities", "anti-cheat", "login-codes"].includes(section);
   if (live && !state.api?.authenticated) {
     return <LiveContext.Provider value={live}>
       <div className="app-shell auth-shell">
@@ -666,7 +666,7 @@ export function App() {
                 <LoginPanel />
               ) : live &&
                 !live.current &&
-                !["query", "accounts", "settings", "system", "quests", "mail", "benefits", "activities", "anti-cheat"].includes(section) ? (
+                !["query", "accounts", "settings", "system", "quests", "mail", "benefits", "activities", "anti-cheat", "login-codes"].includes(section) ? (
                 <div className="glass content-panel empty-character-panel">
                   <Empty
                     title="选择一位角色开始管理"

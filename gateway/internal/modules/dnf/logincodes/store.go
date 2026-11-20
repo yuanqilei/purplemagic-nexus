@@ -25,6 +25,8 @@ func NewStore(db *sql.DB, tablePrefix string) (*Store, error) {
 
 func (s *Store) EnsureSchema(ctx context.Context) error {
 	for _, ddl := range []string{
+"CREATE TABLE IF NOT EXISTS "+s.prefix+"_policy (id INT PRIMARY KEY, required BOOLEAN NOT NULL DEFAULT TRUE) ENGINE=InnoDB",
+"INSERT IGNORE INTO "+s.prefix+"_policy(id,required) VALUES (1,TRUE)",
 		"CREATE TABLE IF NOT EXISTS "+s.prefix+" (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, code_hash CHAR(64) NOT NULL, code_prefix CHAR(8) NOT NULL, batch_id VARCHAR(64) NOT NULL, status ENUM('issued','reserved','active','revoked') NOT NULL DEFAULT 'issued', bound_account VARCHAR(128) NULL, reserved_at DATETIME(6) NULL, max_uses INT UNSIGNED NOT NULL DEFAULT 1, used_count INT UNSIGNED NOT NULL DEFAULT 0, expires_at DATETIME(6) NULL, activated_at DATETIME(6) NULL, created_by VARCHAR(64) NOT NULL, note VARCHAR(200) NOT NULL DEFAULT '', created_at DATETIME(6) NOT NULL, UNIQUE KEY uk_code_hash(code_hash), KEY idx_batch(batch_id), KEY idx_status(status), KEY idx_bound(bound_account)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 		"CREATE TABLE IF NOT EXISTS "+s.prefix+"_audit (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, code_id BIGINT UNSIGNED NOT NULL, action VARCHAR(32) NOT NULL, result VARCHAR(32) NOT NULL, actor VARCHAR(64) NOT NULL, ip VARCHAR(64) NOT NULL DEFAULT '', detail VARCHAR(200) NOT NULL DEFAULT '', at DATETIME(6) NOT NULL, KEY idx_code(code_id,at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 	} { if _, err := s.db.ExecContext(ctx, ddl); err != nil { return err } }
@@ -48,7 +50,7 @@ func formatCode(normal string) string { return "DNF-"+normal[:4]+"-"+normal[4:8]
 func newCode() (string,error) { b:=make([]byte,16); out:=make([]byte,16); for i:=range out { for { if _,err:=rand.Read(b[:1]); err!=nil{return "",err}; if b[0]<252 { out[i]=alphabet[int(b[0])%len(alphabet)]; break } } }; return string(out),nil }
 
 type GenerateInput struct { Count int `json:"count"`; Batch string `json:"batch"`; ExpiresAt *time.Time `json:"expiresAt"`; MaxUses int `json:"maxUses"`; Note string `json:"note"` }
-type Code struct { ID uint64 `json:"id"`; Prefix string `json:"prefix"`; Batch string `json:"batch"`; Status string `json:"status"`; Account string `json:"account,omitempty"`; Used uint `json:"used"`; Max uint `json:"max"`; ExpiresAt *time.Time `json:"expiresAt,omitempty"`; Note string `json:"note"`; CreatedAt time.Time `json:"createdAt"` }
+type Code struct { ID uint64 `json:"id"`; Prefix string `json:"prefix"`; Batch string `json:"batch"`; Status string `json:"status"`; Account string `json:"account,omitempty"`; Used uint `json:"used"`; Max uint `json:"max"`; ExpiresAt *time.Time `json:"expiresAt,omitempty"`; Note string `json:"note"`; ActivatedAt *time.Time `json:"activatedAt,omitempty"`; CreatedAt time.Time `json:"createdAt"` }
 type Page struct { Total int `json:"total"`; Items []Code `json:"items"` }
 func (s *Store) Generate(ctx context.Context, in GenerateInput, actor string) ([]string,error) {
 	if in.MaxUses==0 { in.MaxUses=1 }
@@ -60,12 +62,13 @@ func (s *Store) Generate(ctx context.Context, in GenerateInput, actor string) ([
 	for i:=0;i<in.Count;i++ { normal,e:=newCode(); if e!=nil{return nil,e}; shown:=formatCode(normal); result,e:=tx.ExecContext(ctx,"INSERT INTO "+s.prefix+" (code_hash,code_prefix,batch_id,max_uses,expires_at,created_by,note,created_at) VALUES (?,?,?,?,?,?,?,UTC_TIMESTAMP(6))",hashCode(normal),shown[:8],batch,in.MaxUses,in.ExpiresAt,actor,in.Note); if e!=nil{return nil,e}; id,_:=result.LastInsertId(); if _,e=tx.ExecContext(ctx,"INSERT INTO "+s.prefix+"_audit(code_id,action,result,actor,at) VALUES (?,'generate','ok',?,UTC_TIMESTAMP(6))",id,actor); e!=nil{return nil,e}; codes=append(codes,shown) }
 	if err=tx.Commit(); err!=nil{return nil,err}; return codes,nil
 }
-func (s *Store) List(ctx context.Context, status,batch string,page,size int) (Page,error) {
+func (s *Store) List(ctx context.Context, status,batch string,page,size int, search ...string) (Page,error) {
 	if page<1 {page=1}; if size<1 {size=50}; if size>100 {size=100}
-	where:=" WHERE (?='' OR status=?) AND (?='' OR batch_id=?)"; var out Page
-	if err:=s.db.QueryRowContext(ctx,"SELECT COUNT(*) FROM "+s.prefix+where,status,status,batch,batch).Scan(&out.Total); err!=nil{return out,err}
-	rows,err:=s.db.QueryContext(ctx,"SELECT id,code_prefix,batch_id,status,COALESCE(bound_account,''),used_count,max_uses,expires_at,note,created_at FROM "+s.prefix+where+" ORDER BY id DESC LIMIT ? OFFSET ?",status,status,batch,batch,size,(page-1)*size); if err!=nil{return out,err}; defer rows.Close()
-	out.Items=[]Code{}; for rows.Next(){ var v Code; if err=rows.Scan(&v.ID,&v.Prefix,&v.Batch,&v.Status,&v.Account,&v.Used,&v.Max,&v.ExpiresAt,&v.Note,&v.CreatedAt);err!=nil{return out,err}; out.Items=append(out.Items,v) }; return out,rows.Err()
+	term:="";if len(search)>0{term=strings.TrimSpace(search[0])}; hash:="";if normal,e:=Normalize(term);e==nil{hash=hashCode(normal)}
+ where:=" WHERE (?='' OR status=?) AND (?='' OR batch_id=?) AND (?='' OR bound_account=? OR code_prefix LIKE ? OR batch_id=? OR code_hash=? OR EXISTS (SELECT 1 FROM "+s.prefix+"_audit a WHERE a.code_id="+s.prefix+".id AND a.detail=?))"; var out Page
+	if err:=s.db.QueryRowContext(ctx,"SELECT COUNT(*) FROM "+s.prefix+where,status,status,batch,batch,term,term,term+"%",term,hash,term).Scan(&out.Total); err!=nil{return out,err}
+	rows,err:=s.db.QueryContext(ctx,"SELECT id,code_prefix,batch_id,status,COALESCE(bound_account,''),used_count,max_uses,expires_at,note,activated_at,created_at FROM "+s.prefix+where+" ORDER BY id DESC LIMIT ? OFFSET ?",status,status,batch,batch,term,term,term+"%",term,hash,term,size,(page-1)*size); if err!=nil{return out,err}; defer rows.Close()
+	out.Items=[]Code{}; for rows.Next(){ var v Code; if err=rows.Scan(&v.ID,&v.Prefix,&v.Batch,&v.Status,&v.Account,&v.Used,&v.Max,&v.ExpiresAt,&v.Note,&v.ActivatedAt,&v.CreatedAt);err!=nil{return out,err}; out.Items=append(out.Items,v) }; return out,rows.Err()
 }
 func (s *Store) Action(ctx context.Context,id uint64, action,actor,ip string) error {
 	if id==0 || (action!="revoke"&&action!="unbind"&&action!="resolve") {return errors.New("注册码操作无效")}
@@ -96,6 +99,10 @@ func (s *Store) Finish(ctx context.Context,id uint64,account,actor,ip string,suc
 	result:="invalid"; var updated sql.Result
 	if success { updated,err=tx.ExecContext(ctx,"UPDATE "+s.prefix+" SET status='active',reserved_at=NULL,used_count=1,activated_at=UTC_TIMESTAMP(6) WHERE id=? AND status='reserved' AND bound_account=?",id,account); result="ok" } else { updated,err=tx.ExecContext(ctx,"UPDATE "+s.prefix+" SET status='issued',bound_account=NULL,reserved_at=NULL WHERE id=? AND status='reserved' AND bound_account=?",id,account) }
 	if err!=nil{return err}; n,err:=updated.RowsAffected(); if err!=nil{return err}; if n!=1{return errors.New("注册码状态已变化")}
-	if _,err=tx.ExecContext(ctx,"INSERT INTO "+s.prefix+"_audit(code_id,action,result,actor,ip,at) VALUES (?,'activate',?,?,?,UTC_TIMESTAMP(6))",id,result,actor,ip);err!=nil{return err}; return tx.Commit()
+	if _,err=tx.ExecContext(ctx,"INSERT INTO "+s.prefix+"_audit(code_id,action,result,actor,ip,detail,at) VALUES (?,'activate',?,?,?,?,UTC_TIMESTAMP(6))",id,result,actor,ip,account);err!=nil{return err}; return tx.Commit()
 }
 func (s *Store) String() string { return fmt.Sprintf("login-code-store(%s)",s.prefix) }
+
+type Policy struct { Required bool `json:"required"` }
+func(s *Store) Policy(ctx context.Context)(Policy,error){var p Policy;err:=s.db.QueryRowContext(ctx,"SELECT required FROM "+s.prefix+"_policy WHERE id=1").Scan(&p.Required);return p,err}
+func(s *Store) SetPolicy(ctx context.Context,p Policy)error{_,err:=s.db.ExecContext(ctx,"UPDATE "+s.prefix+"_policy SET required=? WHERE id=1",p.Required);return err}

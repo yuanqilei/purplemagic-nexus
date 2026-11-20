@@ -319,7 +319,7 @@ public sealed class LauncherEngine : IDisposable
     public async Task Register(Credentials input)
     {
         if (!await operation.WaitAsync(0)) throw new InvalidOperationException("已有操作正在进行。");
-        try { ValidateCredentials(input); if(string.IsNullOrWhiteSpace(input.Code)) throw new InvalidDataException("请输入注册码。"); Emit("logging-in", "正在注册本服账号…"); using var api = new PlayerApi(Profile); await api.Submit("register", input.Account.Trim(), input.Password, Device(), code:input.Code.Trim()); PersistLogin(input); Emit("ready", "注册成功，账号与密码已安全保存。"); }
+        try { ValidateCredentials(input); Emit("logging-in", "正在注册本服账号…"); using var api = new PlayerApi(Profile); await api.Submit("register", input.Account.Trim(), input.Password, Device(), code:input.Code.Trim()); PersistLogin(input); Emit("ready", "注册成功，账号与密码已安全保存。"); }
         catch { Emit("error", "注册未完成，请查看提示。"); throw; }
         finally { operation.Release(); }
     }

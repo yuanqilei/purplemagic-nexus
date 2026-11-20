@@ -112,9 +112,11 @@ func handlerWithCodes(c config, hub *launcherhub.Hub, codes *logincodes.Store) h
 			var payload map[string]json.RawMessage
 			if json.Unmarshal(body,&payload)!=nil {playerError(w,http.StatusBadRequest,"invalid_request","注册请求无效");return}
 			var code,account string
-			if json.Unmarshal(payload["code"],&code)!=nil || json.Unmarshal(payload["account"],&account)!=nil {playerError(w,http.StatusBadRequest,"invalid_code","请输入有效注册码");return}
+			if (len(payload["code"])>0 && json.Unmarshal(payload["code"],&code)!=nil) || json.Unmarshal(payload["account"],&account)!=nil {playerError(w,http.StatusBadRequest,"invalid_code","请输入有效注册码");return}
 			ip,_,_:=net.SplitHostPort(r.RemoteAddr)
-			id,err:=codes.Reserve(r.Context(),code,account,"player",ip)
+			policy,err:=codes.Policy(r.Context());if err!=nil{playerError(w,503,"registration_unavailable","注册策略暂不可用");return}
+if !policy.Required{delete(payload,"code");forwarded,e:=json.Marshal(payload);if e!=nil{playerError(w,400,"invalid_request","注册请求无效");return};r.Body=io.NopCloser(bytes.NewReader(forwarded));r.ContentLength=int64(len(forwarded));r.Header.Set("Content-Length",strconv.Itoa(len(forwarded)));proxy.ServeHTTP(w,r);return}
+id,err:=codes.Reserve(r.Context(),code,account,"player",ip)
 			if err!=nil {
 				if strings.Contains(err.Error(),"注册码") || err.Error()=="账号无效" { playerError(w,http.StatusForbidden,"invalid_code",err.Error()) } else { playerError(w,http.StatusServiceUnavailable,"registration_unavailable","注册码服务暂不可用") }
 				return

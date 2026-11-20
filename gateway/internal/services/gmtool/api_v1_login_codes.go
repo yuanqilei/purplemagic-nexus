@@ -21,7 +21,7 @@ func (s *Server) v1GenerateLoginCodes(w http.ResponseWriter, r *http.Request) {
 func (s *Server) v1LoginCodes(w http.ResponseWriter,r *http.Request) {
 	if s.deps.LoginCodes==nil {v1Fail(w,r,503,"unavailable","注册码服务暂不可用",true);return}
 	q:=r.URL.Query(); page,_:=strconv.Atoi(q.Get("page")); size,_:=strconv.Atoi(q.Get("size"))
-	out,err:=s.deps.LoginCodes.List(r.Context(),q.Get("status"),q.Get("batch"),page,size)
+	out,err:=s.deps.LoginCodes.List(r.Context(),q.Get("status"),q.Get("batch"),page,size,q.Get("q"))
 	if err!=nil {s.v1Unavailable(w,r,err);return}; v1Reply(w,r,200,v1Envelope{Data:out})
 }
 func (s *Server) v1LoginCodeAction(w http.ResponseWriter,r *http.Request) {
@@ -37,3 +37,5 @@ func (s *Server) v1LoginCodeAudit(w http.ResponseWriter,r *http.Request) {
 	size,_:=strconv.Atoi(r.URL.Query().Get("size")); ctx,cancel:=context.WithTimeout(r.Context(),5*time.Second); defer cancel()
 	rows,err:=s.deps.LoginCodes.Audit(ctx,id,size); if err!=nil {s.v1Unavailable(w,r,err);return}; v1Reply(w,r,200,v1Envelope{Data:rows})
 }
+
+func(s *Server) v1LoginCodePolicy(w http.ResponseWriter,r *http.Request){if s.deps.LoginCodes==nil{v1Fail(w,r,503,"unavailable","注册码服务暂不可用",true);return};if r.Method=="POST"{p,ok:=decodeBody[logincodes.Policy](w,r);if !ok{return};if err:=s.deps.LoginCodes.SetPolicy(r.Context(),p);err!=nil{s.v1Unavailable(w,r,err);return}};p,err:=s.deps.LoginCodes.Policy(r.Context());if err!=nil{s.v1Unavailable(w,r,err);return};v1Reply(w,r,200,v1Envelope{Data:p})}

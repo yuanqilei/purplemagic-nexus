@@ -687,7 +687,7 @@ class _PreviewHomeState extends State<PreviewHome> {
               const SizedBox(height: 14),
               _field(
                 '注册码',
-                '输入 GM 后台生成的注册码',
+                '开启校验时填写 GM 后台生成的注册码',
                 registrationCode,
                 Icons.confirmation_number_outlined,
                 'registration-code',
@@ -1100,10 +1100,6 @@ class _PreviewHomeState extends State<PreviewHome> {
     if (submitting || model.busy || (!registering && !model.canLogin)) return;
     if (account.text.trim().isEmpty || password.text.isEmpty) {
       setState(() => error = '请输入账号和密码');
-      return;
-    }
-    if (registering && registrationCode.text.trim().isEmpty) {
-      setState(() => error = '请输入注册码');
       return;
     }
     if (registering && password.text != confirmation.text) {
