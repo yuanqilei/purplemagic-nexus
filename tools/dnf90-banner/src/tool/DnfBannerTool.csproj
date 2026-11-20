@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- =====================================================================
+       DnfBannerTool : DNF90 横幅文字扫描 / 替换工具（.NET 10）
+       =====================================================================
+       说明：
+         通过 ReadProcessMemory / WriteProcessMemory 跨进程读写游戏内存，
+         定位策略与 C++ 版 ijl15 代理完全一致（锚点 + 前缀校验 + 等长替换）。
+
+         为什么它不是 DLL：
+         DNF.exe 是 32 位程序，而 .NET 的 NativeAOT 只支持 x64 / arm64，
+         无法生成 x86 原生 DLL，所以常驻方案只能用 C++。
+       ===================================================================== -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>DnfBannerTool</AssemblyName>
+    <RootNamespace>DnfBannerTool</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+</Project>
