@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 #  编译 ijl15.dll 代理
 #  依赖：Visual Studio 2022 BuildTools（C++ x86 工具链）
 #  用法：在本目录执行  .\build.ps1
@@ -15,8 +15,8 @@ $output = Join-Path $PSScriptRoot 'ijl15.dll'
 if (Test-Path $output) { Remove-Item $output -Force }
 
 $args = 'call "{0}" x86 >nul && cd /d "{1}" && ' +
-        'cl /nologo /O2 /MT /LD /EHsc /std:c++17 /utf-8 /Ivendor/imgui ijl15_proxy.cpp native_redemption.cpp vendor/imgui/imgui.cpp vendor/imgui/imgui_draw.cpp vendor/imgui/imgui_tables.cpp vendor/imgui/imgui_widgets.cpp vendor/imgui/backends/imgui_impl_win32.cpp vendor/imgui/backends/imgui_impl_dx9.cpp vendor/minhook/src/buffer.c vendor/minhook/src/hook.c vendor/minhook/src/trampoline.c vendor/minhook/src/hde/hde32.c ' +
-        '/link /DEF:ijl15_proxy.def /OUT:"{2}" /MACHINE:X86 psapi.lib d3d9.lib dwmapi.lib gdi32.lib user32.lib imm32.lib crypt32.lib'
+        'cl /nologo /O2 /MT /LD /EHsc /utf-8 ijl15_proxy.cpp ' +
+        '/link /DEF:ijl15_proxy.def /OUT:"{2}" /MACHINE:X86 psapi.lib'
 $command = $args -f $vcvars, $PSScriptRoot, $output
 
 cmd /c $command

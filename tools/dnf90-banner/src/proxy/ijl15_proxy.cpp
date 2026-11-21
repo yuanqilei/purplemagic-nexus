@@ -42,7 +42,6 @@
 #include <cstring>
 #include <string>
 #include <vector>
-#include "native_redemption.h"
 
 // =============================================================================
 //  一、导出转发
@@ -396,7 +395,6 @@ static DWORD WINAPI MainThread(LPVOID)
     Log("loaded, orig=%d fn0=0x%08X", (int)g_origLoaded, (unsigned)(uintptr_t)g_fn[0]);
 
     LoadConfig();
-    StartNativeRedemption();
 
     SYSTEM_INFO si{};
     GetSystemInfo(&si);
