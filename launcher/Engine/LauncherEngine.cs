@@ -31,7 +31,7 @@ public sealed class LauncherEngine : IDisposable
         if (!response.IsSuccessStatusCode) throw new InvalidOperationException(body.Length > 200 ? "礼包请求失败，请稍后重试。" : body);
         return new LoginReply(true, null, null, body);
     }
-    public const string VersionText = "1.0.17";
+    public const string VersionText = "1.0.18";
     public const string ContentCapabilitiesHeader = "X-DNF90-Content-Capabilities";
     public const string ContentCapabilities = "native-plugins-v1";
     private readonly PlayerProfile root;

@@ -8,8 +8,20 @@ if (args.Length > 0 && args[0] == "--diagnostic-observer") { Environment.Exit(aw
 Console.InputEncoding = System.Text.Encoding.UTF8;
 Console.OutputEncoding = new System.Text.UTF8Encoding(false);
 
-using var profileStream = typeof(Program).Assembly.GetManifestResourceStream("profile.json")!;
+// An operator-provided local sidecar is the deployment trust root, never a network download.
+var launchDirectory = Environment.GetEnvironmentVariable("DNF90_LAUNCH_DIRECTORY");
+var deploymentProfile = Path.Combine(string.IsNullOrWhiteSpace(launchDirectory) ? AppContext.BaseDirectory : Path.GetFullPath(launchDirectory), "PurpleMagic.profile.json");
+SafeFiles.NoLinks(deploymentProfile);
+if (File.Exists(deploymentProfile) && new FileInfo(deploymentProfile).Length > 65536) throw new InvalidDataException("通讯配置文件过大。");
+using var profileStream = File.Exists(deploymentProfile) ? File.OpenRead(deploymentProfile) : typeof(Program).Assembly.GetManifestResourceStream("profile.json")!;
 var profile = JsonSerializer.Deserialize(profileStream, CoreJson.Default.PlayerProfile)!;
+if (args.Length == 1 && args[0] == "--deployment-info") {
+    Console.WriteLine(profile.ApiUrl);
+    Console.WriteLine(profile.ExeSha256);
+    Console.WriteLine(profile.PvfSha256);
+    Console.WriteLine(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(profile.UpdatePublicKey))).ToLowerInvariant());
+    return;
+}
 if (args.Length == 1 && args[0] == "--build-flavor") {
     profile.AntiCheat?.Validate();
 #if !ANTICHEAT
@@ -31,7 +43,7 @@ if (args.Length == 2 && args[0] == "--recover-bundle") { BundleInstaller.Recover
 // parent and sends bounded newline JSON through redirected process pipes.
 var data = args.Length == 2 && args[0] == "--state-directory"
     ? Path.GetFullPath(args[1])
-    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DNF90Launcher" + (LauncherBuild.AntiCheat ? "-anticheat" : ""));
+    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DNF90Launcher" + (LauncherBuild.AntiCheat ? "-anticheat" : ""), "servers", Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(profile.ApiUrl + "\n" + profile.UpdatePublicKey))).ToLowerInvariant()[..24]);
 SafeFiles.NoLinks(data);
 Directory.CreateDirectory(data);
 using var instance = new FileStream(Path.Combine(data, "instance.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
@@ -123,3 +135,4 @@ while (await Console.In.ReadLineAsync() is { } line)
 engine.Pause();
 engine.StopProtectedGames();
 await Task.WhenAll(jobs);
+
