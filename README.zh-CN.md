@@ -102,6 +102,8 @@ GM 诊断可关联跨服务请求，并记录账号查询、福利详情和发�
 
 仓库提供 [Linux Docker Compose 部署包](deploy/selfhost/compose.yaml)、多阶段镜像和私有配置准备工具。准备已有游戏服务/MariaDB、批准 PVF、玩家 profile 与证书后，从配置模板生成服务文件、构建六类索引、初始化管理附加表，再启动 PlayerGateway、GMService 和 HTTPS 入口。
 
+使用 IP 地址作为玩家网关时，玩家证书还需包含 `DNS:localhost` SAN，供 nginx 校验本机 HTTPS 上游。
+
 ```text
 python3 deploy/selfhost/prepare.py --settings runtime/selfhost-settings.json --output runtime/selfhost
 docker compose --env-file runtime/selfhost/compose.env -f deploy/selfhost/compose.yaml build

@@ -102,6 +102,8 @@ Management writes use revision checks, idempotency keys and durable receipts. Ch
 
 The repository ships a [Linux Docker Compose recipe](deploy/selfhost/compose.yaml), multi-stage image and private configuration generator. Supply an existing game server/MariaDB, approved PVF, player profile and certificates, then prepare the service files, build six index categories, initialize additive management tables and start PlayerGateway, GMService and the HTTPS edge.
 
+When the player gateway uses an IP address, its certificate must also include the `DNS:localhost` SAN so nginx can verify its local HTTPS upstream.
+
 ```text
 python3 deploy/selfhost/prepare.py --settings runtime/selfhost-settings.json --output runtime/selfhost
 docker compose --env-file runtime/selfhost/compose.env -f deploy/selfhost/compose.yaml build

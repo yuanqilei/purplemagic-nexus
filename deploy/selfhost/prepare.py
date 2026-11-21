@@ -35,6 +35,11 @@ def san_check(hostname):
     return ('-checkip', hostname) if IPV4.fullmatch(hostname) else ('-checkhost', hostname)
 
 
+def upstream_tls_name(hostname):
+    """Nginx verifies DNS SANs for the loopback TLS upstream."""
+    return 'localhost' if IPV4.fullmatch(hostname) else hostname
+
+
 def write(path, value):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -86,6 +91,11 @@ def prepare(settings, output, uid=None, gid=None):
         if b'does match certificate' not in openssl('x509', '-in', inputs[cert], '-noout',
                                                    *san_check(hostname)):
             raise ValueError('Certificate does not cover its configured hostname')
+    proxy_tls_name = upstream_tls_name(player.hostname)
+    if (proxy_tls_name == 'localhost'
+            and b'does match certificate' not in openssl(
+                'x509', '-in', inputs['playerCertificate'], '-noout', '-checkhost', 'localhost')):
+        raise ValueError('IP player certificates must also include DNS SAN localhost for nginx')
     database = settings['database']
     if set(database) != {'registrationDsn', 'repositoryDsn', 'accountTable', 'databases', 'tablePrefix'}:
         raise ValueError('Use the database mapping fields in settings.example.json')
@@ -150,7 +160,7 @@ def prepare(settings, output, uid=None, gid=None):
         proxy_ssl_verify on;
         proxy_ssl_trusted_certificate /etc/nginx/player-ca.pem;
         proxy_ssl_server_name on;
-        proxy_ssl_name PLAYER;
+        proxy_ssl_name PLAYER_TLS_NAME;
         proxy_set_header Host $host;
         proxy_read_timeout 180s;
     }
@@ -161,7 +171,7 @@ def prepare(settings, output, uid=None, gid=None):
         proxy_read_timeout 180s;
     }
 }
-'''.replace('DOMAIN', domain.hostname).replace('PLAYER', player.hostname)
+'''.replace('DOMAIN', domain.hostname).replace('PLAYER_TLS_NAME', proxy_tls_name)
     write(output / 'nginx.conf', nginx)
     write(output / 'prepared.json', json.dumps({'format': 1, 'pvfSha256': pvf_hash, 'ports': [443, 8443],
                                                'privatePorts': [18080, 18081, 18444]}, indent=2) + '\n')
