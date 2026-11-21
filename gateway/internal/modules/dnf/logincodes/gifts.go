@@ -9,10 +9,13 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Gift codes share the registration database, but never registration-code rows.
 type Gift struct {
+	Kind     string          `json:"kind"`
+	Code     string          `json:"code"`
 	ID       uint64          `json:"id"`
 	Name     string          `json:"name"`
 	Campaign string          `json:"campaign"`
@@ -43,7 +46,18 @@ func (s *Store) EnsureGiftSchema(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	if err := s.ensureCodeColumn(ctx, s.prefix+"_gifts"); err != nil {
+		return err
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME='code_kind'", s.prefix+"_gifts").Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, "ALTER TABLE "+s.prefix+"_gifts ADD COLUMN code_kind VARCHAR(16) NULL")
+	return err
 }
 func giftHash(code string) string {
 	h := sha256.Sum256([]byte(strings.ToUpper(strings.TrimSpace(code))))
@@ -53,7 +67,7 @@ func (s *Store) CreateGifts(ctx context.Context, g Gift, count int, phrase strin
 	if count < 1 || count > 1000 || len(g.Name) == 0 || len(g.Name) > 100 || len(g.Campaign) == 0 || len(g.Campaign) > 64 || g.MaxUses < 1 || !g.EndsAt.After(g.StartsAt) || !g.EndsAt.After(time.Now()) || len(g.Reward) == 0 {
 		return nil, errors.New("礼包参数无效")
 	}
-	if phrase != "" && (count != 1 || len(phrase) > 128 || len(strings.TrimSpace(phrase)) < 4) {
+	if phrase != "" && (count != 1 || len(phrase) > 128 || utf8.RuneCountInString(strings.TrimSpace(phrase)) < 1) {
 		return nil, errors.New("口令长度或数量无效")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -61,6 +75,10 @@ func (s *Store) CreateGifts(ctx context.Context, g Gift, count int, phrase strin
 		return nil, err
 	}
 	defer tx.Rollback()
+	kind := "cdk"
+	if phrase != "" {
+		kind = "phrase"
+	}
 	out := []string{}
 	for i := 0; i < count; i++ {
 		code := strings.TrimSpace(phrase)
@@ -69,13 +87,18 @@ func (s *Store) CreateGifts(ctx context.Context, g Gift, count int, phrase strin
 			if e != nil {
 				return nil, e
 			}
-			code = "GIFT-" + n
+			code = strings.Map(func(r rune) rune {
+				if r >= '0' && r <= '9' {
+					return rune('A' + r - '0')
+				}
+				return r
+			}, n)
 		}
 		prefix := []rune(code)
 		if len(prefix) > 8 {
 			prefix = prefix[:8]
 		}
-		_, err = tx.ExecContext(ctx, "INSERT INTO "+s.prefix+"_gifts(code_hash,prefix,name,campaign,max_uses,starts_at,ends_at,reward) VALUES (?,?,?,?,?,?,?,?)", giftHash(code), string(prefix), g.Name, g.Campaign, g.MaxUses, g.StartsAt.UTC(), g.EndsAt.UTC(), string(g.Reward))
+		_, err = tx.ExecContext(ctx, "INSERT INTO "+s.prefix+"_gifts(code_hash,code_plain,code_kind,prefix,name,campaign,max_uses,starts_at,ends_at,reward) VALUES (?,?,?,?,?,?,?,?,?,?)", giftHash(code), code, kind, string(prefix), g.Name, g.Campaign, g.MaxUses, g.StartsAt.UTC(), g.EndsAt.UTC(), string(g.Reward))
 		if err != nil {
 			return nil, err
 		}
@@ -86,12 +109,12 @@ func (s *Store) CreateGifts(ctx context.Context, g Gift, count int, phrase strin
 func scanGift(row interface{ Scan(...any) error }) (Gift, error) {
 	var g Gift
 	var raw string
-	err := row.Scan(&g.ID, &g.Name, &g.Campaign, &g.Prefix, &g.MaxUses, &g.Used, &g.Disabled, &g.StartsAt, &g.EndsAt, &raw)
+	err := row.Scan(&g.ID, &g.Kind, &g.Code, &g.Name, &g.Campaign, &g.Prefix, &g.MaxUses, &g.Used, &g.Disabled, &g.StartsAt, &g.EndsAt, &raw)
 	g.Reward = json.RawMessage(raw)
 	return g, err
 }
 
-const giftColumns = "id,name,campaign,prefix,max_uses,used,disabled,starts_at,ends_at,reward"
+const giftColumns = "id,COALESCE(code_kind,'legacy'),COALESCE(code_plain,''),name,campaign,prefix,max_uses,used,disabled,starts_at,ends_at,reward"
 
 func (s *Store) Gifts(ctx context.Context) ([]Gift, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT "+giftColumns+" FROM "+s.prefix+"_gifts ORDER BY id DESC LIMIT 1000")

@@ -21,7 +21,7 @@ func TestGiftRejectsInvalidConfigurationBeforeWriting(t *testing.T) {
 		phrase string
 		change func(*Gift)
 	}{
-		{0, "", nil}, {1001, "", nil}, {2, "共享口令", nil}, {1, "a", nil},
+		{0, "", nil}, {1001, "", nil}, {2, "共享口令", nil}, {1, "   ", nil},
 		{1, "", func(g *Gift) { g.MaxUses = 0 }}, {1, "", func(g *Gift) { g.EndsAt = g.StartsAt }},
 		{1, "", func(g *Gift) { g.Campaign = "" }},
 	} {
@@ -71,9 +71,28 @@ func TestGiftMySQLConcurrentAllowanceAndReplay(t *testing.T) {
 	if err = s.EnsureGiftSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
+ if err=s.EnsureSchema(ctx); err!=nil { t.Fatal(err) }
+ registration,err:=s.Generate(ctx,GenerateInput{Count:2,Batch:"persistence-test"},"fixture")
+ if err!=nil { t.Fatal(err) }
+ another,err:=NewStore(db,"accounts")
+ if err!=nil { t.Fatal(err) }
+ listed,err:=another.List(ctx,"","persistence-test",1,100)
+ if err!=nil || len(listed.Items)!=2 || listed.Items[0].Code!=registration[1] { t.Fatal("registration plaintext not persisted",err) }
 	codes, err := s.CreateGifts(ctx, Gift{Name: "限量口令", Campaign: "launch", MaxUses: 3, StartsAt: time.Now().Add(-time.Minute), EndsAt: time.Now().Add(time.Hour), Reward: []byte(`{}`)}, 1, "公益开服口令")
 	if err != nil {
 		t.Fatal(err)
+	}
+	// A fresh store instance must return the exact original plaintext after reload.
+	reloaded, e := NewStore(db, "accounts")
+	if e != nil {
+		t.Fatal(e)
+	}
+	saved, e := reloaded.Gifts(ctx)
+	if e != nil || len(saved) != 1 || saved[0].Code != codes[0] || saved[0].Kind != "phrase" {
+		t.Fatal("plaintext phrase not persisted", e)
+	}
+	if e = s.EnsureGiftSchema(ctx); e != nil {
+		t.Fatal("schema migration is not repeatable", e)
 	}
 	var accepted atomic.Int32
 	var wg sync.WaitGroup
@@ -118,6 +137,17 @@ func TestGiftMySQLConcurrentAllowanceAndReplay(t *testing.T) {
 	batch, err := s.CreateGifts(ctx, Gift{Name: "随机礼包", Campaign: "random", MaxUses: 1, StartsAt: time.Now().Add(-time.Minute), EndsAt: time.Now().Add(time.Hour), Reward: []byte(`{}`)}, 2, "")
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, code := range batch {
+		for _, r := range code {
+			if r < 'A' || r > 'Z' {
+				t.Fatal("CDK contains a non-letter")
+			}
+		}
+	}
+	saved, e = reloaded.Gifts(ctx)
+	if e != nil || len(saved) != 3 || saved[0].Code != batch[1] || saved[0].Kind != "cdk" {
+		t.Fatal("plaintext CDK not persisted", e)
 	}
 	if _, _, err = s.ReserveGift(ctx, batch[0], "same-account", "1"); err != nil {
 		t.Fatal(err)

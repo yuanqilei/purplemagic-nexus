@@ -14,7 +14,7 @@ new Function('require', 'module', 'exports', outputFiles[0].text)(createRequire(
 
 test('gift management renders generation and audit controls without a selected account or character', () => {
   const html = renderToStaticMarkup(createElement(compiled.exports.Gifts, { notify() {} }));
-  for (const text of ['公共口令', '活动编号', '物品 ID', '物品数量', '结束时间', '生成礼包码', '兑换记录']) assert.ok(html.includes(text), text);
+  for (const text of ['随机字母 CDK', '活动编号', '物品 ID', '物品数量', '结束时间', '生成礼包码', '兑换记录']) assert.ok(html.includes(text), text);
   assert.match(html, /同活动每账号领取一次/);
   assert.match(html, /原码、原角色重试/);
   assert.match(html, /disabled=""[^>]*>生成礼包码/);

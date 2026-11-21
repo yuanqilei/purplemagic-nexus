@@ -190,3 +190,7 @@ Database checks create disposable MariaDB containers and require Docker. Build t
 PurpleMagic's own project code is licensed under **GNU GPL v3 (`GPL-3.0-only`)**; see [LICENSE](LICENSE). Distribution of covered binaries or modified versions must retain the required notices and provide corresponding source under GPLv3.
 
 Imported code, dependencies and assets retain their original notices and licensing scope. See [licensing details](docs/LICENSING.md), [source provenance](docs/PROVENANCE.md), the [GM notice](gm/NOTICE.md), [current frontend notices](gm-console/THIRD_PARTY_NOTICES.md) and [archived frontend notices](gm-web/THIRD_PARTY_NOTICES.md).
+
+
+### Redemption management (2026-11-21)
+CDK, custom phrases and registration codes share one console section. New codes remain readable in authenticated management lists after reload. Run `--init-management-schema` before upgrading; legacy hashes cannot reconstruct original codes.

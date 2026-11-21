@@ -52,8 +52,8 @@ import { AntiCheatPage } from "./pages/AntiCheat";
 import { ActivitiesPage } from "./pages/Activities";
 import { BenefitsPage } from "./pages/Benefits";
 import { SystemSettings } from "./pages/SystemSettings";
-import { Gifts } from "./pages/Gifts";
-import { LoginCodes } from "./pages/LoginCodes";
+import { Redemption } from "./pages/Redemption";
+
 import { shouldRefreshOnVisibility } from "./api/http";
 import { Settings } from "./pages/Settings";
 import { ConsoleAPI } from "./api/console";
@@ -119,8 +119,7 @@ const navigation = [
     sub: "维护公告、更新资源地址与游戏连接。",
   },
   { id: "system", label: "系统设置", icon: Settings2, title: "系统设置", sub: "配置 GM 工作台的全局行为。" },
-  { id: "gifts", label: "礼包兑换", icon: KeyRound, title: "礼包兑换管理", sub: "生成 CDK、公共口令并追踪发放。" },
-  { id: "login-codes", label: "注册码", icon: KeyRound, title: "注册码管理", sub: "批量发放注册码并查看绑定状态。" },
+  { id: "gifts", label: "兑换与注册", icon: KeyRound, title: "兑换与注册管理", sub: "管理 CDK、口令与注册码，查看完整码及使用记录。" },
 ] as const;
 const preferenceKey = "purplemagic-glass-appearance-v1";
 function readPreferences() {
@@ -728,9 +727,9 @@ export function App() {
                   ) : section === "system" ? (
                     <SystemSettings {...props} />
                   ) : section === "gifts" ? (
- <Gifts {...props} />
+ <Redemption {...props} />
  ) : section === "login-codes" ? (
-                    <LoginCodes {...props} />
+                    <Redemption {...props} />
                   ) : section === "gm" ? (
                     <GmPage {...props} />
                   ) : (

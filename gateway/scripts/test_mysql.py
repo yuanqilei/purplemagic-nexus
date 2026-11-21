@@ -78,7 +78,7 @@ def main():
             env['DNF90GM_V1_BROWSER_SCRIPT']=str(args.console_browser_script.resolve())
         with (out/'mysql.log').open('w',encoding='utf-8') as log:
             result=subprocess.run(['go','test','-buildvcs=false','-count=1','-v',
-                './internal/modules/dnf/testbenefits','./internal/services/gmtool',
+                './internal/modules/dnf/testbenefits','./internal/modules/dnf/logincodes','./internal/services/gmtool',
                 '-run',args.run],cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT)
         (out/'mysql-result.json').write_text(json.dumps({'exit':result.returncode,'disposable':True})+'\n')
         print('Disposable MariaDB tests:', 'PASS' if result.returncode == 0 else f'FAIL ({out / "mysql.log"})')

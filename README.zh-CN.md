@@ -190,3 +190,8 @@ python gm/scripts/test_mysql.py
 PurpleMagic 项目代码采用 **GNU GPL v3（GPL-3.0-only）**，完整条款见 [LICENSE](LICENSE)。分发受 GPL 覆盖的程序及修改版时，保留许可和版权声明，并按 GPLv3 提供对应源码。
 
 导入代码、第三方依赖与素材保留原有声明及许可范围，详见[许可说明](docs/LICENSING.md)、[源码来源](docs/PROVENANCE.md)、[GM 声明](gm/NOTICE.md)、[新版前端声明](gm-console/THIRD_PARTY_NOTICES.md)和[历史前端声明](gm-web/THIRD_PARTY_NOTICES.md)。
+
+
+### 兑换与注册管理（2026-11-21）
+
+CDK、口令和注册码统一在三个页签管理。新码持久保存并支持管理会话下明文倒查；历史仅存哈希的码无法恢复。升级先备份注册库并执行 `--init-management-schema`。游戏活动查询要求网关 `gameToken` 与游戏服 `DNFBRIDGE_PLAYER_ADMIN_SECRET` 一致，部署身份使用 `player_admin_secret` 保留该值。
